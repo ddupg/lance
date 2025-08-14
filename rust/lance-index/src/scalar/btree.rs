@@ -1381,7 +1381,7 @@ impl TrainingSource for BTreeUpdater {
         // them back into a single partition.
         let all_data = Arc::new(UnionExec::new(vec![old_input, new_input]));
         let ordered = Arc::new(SortPreservingMergeExec::new(
-            LexOrdering::new(vec![sort_expr]),
+            LexOrdering::new(vec![sort_expr]).expect("REASON"),
             all_data,
         ));
 

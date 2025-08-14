@@ -49,7 +49,7 @@ use datafusion::{
     prelude::DataFrame,
     scalar::ScalarValue,
 };
-
+use datafusion::common::NullEquality;
 use lance_arrow::{interleave_batches, RecordBatchExt, SchemaExt};
 use lance_datafusion::{
     chunker::chunk_stream,
@@ -627,7 +627,7 @@ impl MergeInsertJob {
                 &JoinType::Full,
                 None,
                 PartitionMode::CollectLeft,
-                true,
+                NullEquality::NullEqualsNull,
             )
             .unwrap(),
         );
