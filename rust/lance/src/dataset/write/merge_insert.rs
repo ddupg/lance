@@ -60,7 +60,7 @@ use std::{
     },
     time::Duration,
 };
-
+use datafusion::common::NullEquality;
 use super::retry::{execute_with_retry, RetryConfig, RetryExecutor};
 use super::{write_fragments_internal, CommitBuilder, WriteParams};
 use crate::dataset::rowids::get_row_id_index;
@@ -631,7 +631,7 @@ impl MergeInsertJob {
                 &JoinType::Full,
                 None,
                 PartitionMode::CollectLeft,
-                true,
+                NullEquality::NullEqualsNull,
             )
             .unwrap(),
         );
