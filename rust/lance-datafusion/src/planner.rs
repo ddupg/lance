@@ -30,7 +30,7 @@ use datafusion::logical_expr::{
     Signature, Volatility, WindowUDF,
 };
 use datafusion::optimizer::simplify_expressions::SimplifyContext;
-use datafusion::sql::planner::{ContextProvider, ParserOptions, PlannerContext, SqlToRel};
+use datafusion::sql::planner::{ContextProvider, NullOrdering, ParserOptions, PlannerContext, SqlToRel};
 use datafusion::sql::sqlparser::ast::{
     AccessExpr, Array as SQLArray, BinaryOperator, DataType as SQLDataType, ExactNumberInfo,
     Expr as SQLExpr, Function, FunctionArg, FunctionArgExpr, FunctionArguments, Ident,
@@ -443,7 +443,8 @@ impl Planner {
                 support_varchar_with_length: false,
                 enable_options_value_normalization: false,
                 collect_spans: false,
-                map_varchar_to_utf8view: false,
+                map_string_types_to_utf8view: false,
+                default_null_ordering: NullOrdering::NullsMax,
             },
         );
 

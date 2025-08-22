@@ -438,6 +438,7 @@ mod tests {
             joins::SortMergeJoinExec, stream::RecordBatchStreamAdapter, ExecutionPlan,
         },
     };
+    use datafusion::common::NullEquality;
     use futures::{StreamExt, TryStreamExt};
     use lance_core::utils::futures::Capacity;
     use lance_datafusion::exec::OneShotExec;
@@ -467,7 +468,7 @@ mod tests {
                 None,
                 JoinType::Inner,
                 vec![SortOptions::default()],
-                true,
+                NullEquality::NullEqualsNull,
             )
             .unwrap(),
         );
