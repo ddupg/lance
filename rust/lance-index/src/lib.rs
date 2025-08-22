@@ -108,6 +108,8 @@ pub enum IndexType {
 
     BloomFilter = 9, // Bloom filter
 
+    RTree = 10, // RTree
+
     // 100+ and up for vector index.
     /// Flat vector index.
     Vector = 100, // Legacy vector index, alias to IvfPq
@@ -132,13 +134,13 @@ impl std::fmt::Display for IndexType {
             Self::MemWal => write!(f, "MemWal"),
             Self::ZoneMap => write!(f, "ZoneMap"),
             Self::BloomFilter => write!(f, "BloomFilter"),
+            Self::RTree => write!(f, "RTree"),
             Self::Vector | Self::IvfPq => write!(f, "IVF_PQ"),
             Self::IvfFlat => write!(f, "IVF_FLAT"),
             Self::IvfSq => write!(f, "IVF_SQ"),
             Self::IvfHnswSq => write!(f, "IVF_HNSW_SQ"),
             Self::IvfHnswPq => write!(f, "IVF_HNSW_PQ"),
             Self::IvfHnswFlat => write!(f, "IVF_HNSW_FLAT"),
-            Self::IvfRq => write!(f, "IVF_RQ"),
         }
     }
 }
@@ -157,7 +159,6 @@ impl TryFrom<i32> for IndexType {
             v if v == Self::FragmentReuse as i32 => Ok(Self::FragmentReuse),
             v if v == Self::MemWal as i32 => Ok(Self::MemWal),
             v if v == Self::ZoneMap as i32 => Ok(Self::ZoneMap),
-            v if v == Self::BloomFilter as i32 => Ok(Self::BloomFilter),
             v if v == Self::Vector as i32 => Ok(Self::Vector),
             v if v == Self::IvfFlat as i32 => Ok(Self::IvfFlat),
             v if v == Self::IvfSq as i32 => Ok(Self::IvfSq),
@@ -190,7 +191,6 @@ impl TryFrom<&str> for IndexType {
             "IVF_FLAT" => Ok(Self::IvfFlat),
             "IVF_SQ" => Ok(Self::IvfSq),
             "IVF_PQ" => Ok(Self::IvfPq),
-            "IVF_RQ" => Ok(Self::IvfRq),
             "IVF_HNSW_FLAT" => Ok(Self::IvfHnswFlat),
             "IVF_HNSW_SQ" => Ok(Self::IvfHnswSq),
             "IVF_HNSW_PQ" => Ok(Self::IvfHnswPq),
@@ -213,7 +213,6 @@ impl IndexType {
                 | Self::Inverted
                 | Self::NGram
                 | Self::ZoneMap
-                | Self::BloomFilter
         )
     }
 
@@ -227,7 +226,6 @@ impl IndexType {
                 | Self::IvfHnswFlat
                 | Self::IvfFlat
                 | Self::IvfSq
-                | Self::IvfRq
         )
     }
 
@@ -252,6 +250,7 @@ impl IndexType {
             Self::MemWal => 0,
             Self::ZoneMap => 0,
             Self::BloomFilter => 0,
+            Self::RTree => 0,
 
             // for now all vector indices are built by the same builder,
             // so they share the same version.
