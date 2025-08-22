@@ -4724,6 +4724,7 @@ dependencies = [
  "datafusion-physical-expr",
  "datafusion-substrait",
  "futures",
+ "geodatafusion",
  "jsonb",
  "lance-arrow",
  "lance-core",
