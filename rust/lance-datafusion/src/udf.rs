@@ -13,6 +13,21 @@ use std::sync::{Arc, LazyLock};
 /// Register UDF functions to datafusion context.
 pub fn register_functions(ctx: &SessionContext) {
     ctx.register_udf(CONTAINS_TOKENS_UDF.clone());
+
+    // GEO UDFs
+    ctx.register_udf(geodatafusion::udf::geo::measurement::Area::new().into());
+    ctx.register_udf(geodatafusion::udf::geo::measurement::Distance::new().into());
+    ctx.register_udf(geodatafusion::udf::geo::measurement::Length::new().into());
+
+    ctx.register_udf(geodatafusion::udf::geo::relationships::Contains::new().into());
+    ctx.register_udf(geodatafusion::udf::geo::relationships::CoveredBy::new().into());
+    ctx.register_udf(geodatafusion::udf::geo::relationships::Covers::new().into());
+    ctx.register_udf(geodatafusion::udf::geo::relationships::Disjoint::new().into());
+    ctx.register_udf(geodatafusion::udf::geo::relationships::Intersects::new().into());
+    ctx.register_udf(geodatafusion::udf::geo::relationships::Overlaps::new().into());
+    ctx.register_udf(geodatafusion::udf::geo::relationships::Touches::new().into());
+
+    ctx.register_udf(geodatafusion::udf::geo::validation::IsValid::new().into());
 }
 
 /// This method checks whether a string contains another string. It utilizes FTS (Full-Text Search)

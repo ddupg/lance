@@ -2106,6 +2106,7 @@ mod tests {
     use rand::Rng;
     use rstest::rstest;
     use std::cmp::Ordering;
+    use arrow_array::types::Float64Type;
     use tempfile::{tempdir, TempDir};
 
     // Used to validate that futures returned are Send.
@@ -7268,5 +7269,94 @@ mod tests {
 
         dataset.validate().await.unwrap();
         assert_eq!(dataset.count_rows(None).await.unwrap(), 3);
+    }
+
+    #[tokio::test]
+    async fn test_geo() {
+        use arrow_array::{ArrayRef, RecordBatch, RecordBatchIterator};
+        use arrow_schema::{DataType, Field, Schema, SchemaRef};
+        use geo_types::line_string;
+        use geoarrow::array::PointBuilder;
+        use geoarrow::datatypes::{Dimension, GeoArrowType, LineStringType, PointType};
+        use geoarrow_array::builder::LineStringBuilder;
+        use geoarrow_array::GeoArrowArray;
+        use std::sync::Arc;
+        use Dataset;
+
+        // 1. build arrow table in memory
+        let point_type = PointType::new(Dimension::XY, Default::default());
+        let line_string_type = LineStringType::new(Dimension::XY, Default::default());
+
+        let schema = Schema::new(vec![
+            Field::new("id", DataType::Int32, false),
+            GeoArrowType::from(point_type.clone()).to_field("point", true),
+            GeoArrowType::from(line_string_type.clone()).to_field("linestring", true),
+        ]);
+        let schema = Arc::new(schema) as SchemaRef;
+
+        let id_array = Arc::new(arrow_array::Int32Array::from(vec![1, 2, 3])) as ArrayRef;
+
+        let mut point_builder = PointBuilder::new(point_type.clone());
+        point_builder.push_point(Some(&geo_types::point!(x: 0., y: 1.)));
+        point_builder.push_point(Some(&geo_types::point!(x: 1., y: 2.)));
+        point_builder.push_point(Some(&geo_types::point!(x: 2., y: 3.)));
+        let point_arr = point_builder.finish();
+
+        let mut line_string_builder = LineStringBuilder::new(line_string_type.clone());
+        line_string_builder
+            .push_line_string(Some(&line_string![
+            (x: -21.95156, y: 64.1446),
+            (x: -21.951, y: 64.14479),
+            ]))
+            .unwrap();
+        line_string_builder
+            .push_line_string(Some(&line_string![
+            (x: -21.951, y: 64.14479),
+            (x: -21.95044, y: 64.14527),
+            ]))
+            .unwrap();
+        line_string_builder
+            .push_line_string(Some(&line_string![
+            (x: -21.95044, y: 64.14527),
+            (x: -21.951445, y: 64.145508),
+            ]))
+            .unwrap();
+        let line_arr = line_string_builder.finish();
+
+        let batch = RecordBatch::try_new(
+            schema.clone(),
+            vec![id_array, point_arr.to_array_ref(), line_arr.to_array_ref()],
+        )
+        .unwrap();
+
+        // 2. write to lance
+        let lance_path = tempdir().unwrap();
+        let reader = RecordBatchIterator::new(vec![batch].into_iter().map(Ok), schema.clone());
+        let mut dataset = Dataset::write(
+            reader,
+            lance_path.path().to_str().unwrap(),
+            Some(Default::default()),
+        )
+        .await
+        .unwrap();
+
+        // 3. query lance with SQL
+        let batches = dataset
+            .sql("SELECT id, ST_Distance(point, linestring) AS distance FROM dataset WHERE id > 1")
+            .build()
+            .await
+            .unwrap()
+            .into_batch_records()
+            .await
+            .unwrap();
+        assert_eq!(batches.len(), 1);
+        for batch in batches {
+            assert_eq!(batch.num_rows(), 2);
+            for row in 0..batch.num_rows() {
+                let id = batch.column(0).as_primitive::<Int32Type>().value(row);
+                let distance = batch.column(1).as_primitive::<Float64Type>().value(row);
+                println!("{} {}", id, distance);
+            }
+        }
     }
 }
