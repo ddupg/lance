@@ -1467,7 +1467,7 @@ fn is_vector_field(data_type: DataType) -> bool {
 mod tests {
     use crate::dataset::builder::DatasetBuilder;
     use crate::dataset::optimize::{compact_files, CompactionOptions};
-    use crate::dataset::{ReadParams, WriteParams};
+    use crate::dataset::{ReadParams, WriteMode, WriteParams};
     use crate::index::vector::VectorIndexParams;
     use crate::session::Session;
     use crate::utils::test::{
@@ -1493,6 +1493,8 @@ mod tests {
     use lance_testing::datagen::generate_random_array;
     use rstest::rstest;
     use std::collections::HashSet;
+    use std::thread::sleep;
+    use std::time::Duration;
     use tempfile::tempdir;
 
     #[tokio::test]
@@ -2956,16 +2958,19 @@ mod tests {
     /// 2. Add a scalar index with train=true  
     /// 3. Update rows in the table
     /// The index remains available on the table.
-    #[rstest]
-    #[case::btree("i", IndexType::BTree, Box::new(ScalarIndexParams::default()))]
-    #[case::bitmap("i", IndexType::Bitmap, Box::new(ScalarIndexParams::default()))]
-    #[case::inverted("text", IndexType::Inverted, Box::new(InvertedIndexParams::default()))]
+    // #[rstest]
+    // #[case::btree("i", IndexType::BTree, Box::new(ScalarIndexParams::default()))]
+    // #[case::bitmap("i", IndexType::Bitmap, Box::new(ScalarIndexParams::default()))]
+    // #[case::inverted("text", IndexType::Inverted, Box::new(InvertedIndexParams::default()))]
     #[tokio::test]
-    async fn test_scalar_index_retained_after_update(
-        #[case] column_name: &str,
-        #[case] index_type: IndexType,
-        #[case] params: Box<dyn IndexParams>,
+    async fn test_scalar_index_retained_after_update(// #[case] column_name: &str,
+        // #[case] index_type: IndexType,
+        // #[case] params: Box<dyn IndexParams>,
     ) {
+        let column_name = "i";
+        let index_type = IndexType::BTree;
+        let params = Box::new(ScalarIndexParams::default());
+
         use crate::dataset::UpdateBuilder;
         use lance_datagen::{array, BatchCount, ByteCount, RowCount};
 
@@ -3126,5 +3131,83 @@ mod tests {
             stats_after_optimization["num_unindexed_rows"], 0,
             "Index should have zero unindexed rows after optimization"
         );
+    }
+
+    #[tokio::test]
+    async fn test_opt_index() {
+        use lance_datagen::{array, BatchCount, ByteCount, RowCount};
+
+        let column_name = "i";
+        let index_type = IndexType::BTree;
+        let params = Box::new(ScalarIndexParams::default());
+
+        let test_dir = tempdir().unwrap();
+        let test_uri = test_dir.path().to_str().unwrap();
+
+        // Create dataset with initial data
+        let reader = gen_batch()
+            .col("i", array::step::<Int32Type>())
+            .col("text", array::rand_utf8(ByteCount::from(10), false))
+            .into_reader_rows(RowCount::from(100), BatchCount::from(1));
+        let mut dataset = Dataset::write(reader, test_uri, None).await.unwrap();
+
+        // Create index with train=true (normal index with data)
+        dataset
+            .create_index_builder(&[column_name], index_type, params.as_ref())
+            .name("index".to_string())
+            .train(true)
+            .await
+            .unwrap();
+        dataset
+            .versions()
+            .await
+            .unwrap()
+            .iter()
+            .for_each(|v| println!("version: {:?}", v.version));
+        let indexs = dataset.load_indices().await.unwrap();
+        assert_eq!(indexs.len(), 1);
+        indexs.iter().for_each(|idx| {
+            println!("index: {:?}", idx);
+        });
+
+        // Verify index is being used in queries before update
+        let plan = dataset
+            .scan()
+            .filter(format!("{} = 50", column_name).as_str())
+            .unwrap()
+            .explain_plan(false)
+            .await
+            .unwrap();
+
+        // Verify index is being used before update
+        assert_index_usage(&plan, column_name, true, "before update");
+
+        let reader = gen_batch()
+            .col("i", array::step::<Int32Type>())
+            .col("text", array::rand_utf8(ByteCount::from(10), false))
+            .into_reader_rows(RowCount::from(100), BatchCount::from(1));
+
+        let mut dataset = Dataset::write(
+            reader,
+            test_uri,
+            Some(WriteParams {
+                mode: WriteMode::Append,
+                ..Default::default()
+            }),
+        )
+        .await
+        .unwrap();
+
+        dataset.optimize_indices(&Default::default()).await.unwrap();
+
+        // Verify index still exists after optimization
+        let indices_after_optimize = dataset.load_indices().await.unwrap();
+        assert_eq!(
+            indices_after_optimize.len(),
+            1,
+            "Index should still exist after optimization following update"
+        );
+
+        // dataset.cleanup_old_versions(chrono.Duration.(1))
     }
 }

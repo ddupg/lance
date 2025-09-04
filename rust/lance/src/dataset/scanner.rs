@@ -1813,7 +1813,10 @@ impl Scanner {
                     })
                 })
                 .collect::<Result<Vec<_>>>()?;
-            plan = Arc::new(SortExec::new(LexOrdering::new(col_exprs).expect("got empty ordering"), plan));
+            plan = Arc::new(SortExec::new(
+                LexOrdering::new(col_exprs).expect("got empty ordering"),
+                plan,
+            ));
         }
 
         // Stage 4: limit / offset
@@ -2622,10 +2625,8 @@ impl Scanner {
                     nulls_first: false,
                 },
             };
-            match_plan = Arc::new(
-                SortExec::new([sort_expr].into(), match_plan)
-                    .with_fetch(params.limit),
-            );
+            match_plan =
+                Arc::new(SortExec::new([sort_expr].into(), match_plan).with_fetch(params.limit));
         }
         Ok(match_plan)
     }
@@ -3169,7 +3170,8 @@ impl Scanner {
                         nulls_first: false,
                     },
                 },
-            ].into(),
+            ]
+            .into(),
             knn_plan,
         )
         .with_fetch(Some(q.k));
@@ -3231,11 +3233,8 @@ impl Scanner {
             },
         };
         Ok(Arc::new(
-            SortExec::new(
-                [sort_expr, sort_expr_row_id].into(),
-                inner_fanout_search,
-            )
-            .with_fetch(Some(q.k * q.refine_factor.unwrap_or(1) as usize)),
+            SortExec::new([sort_expr, sort_expr_row_id].into(), inner_fanout_search)
+                .with_fetch(Some(q.k * q.refine_factor.unwrap_or(1) as usize)),
         ))
     }
 
@@ -3293,11 +3292,8 @@ impl Scanner {
                 },
             };
             let ann_node = Arc::new(
-                SortExec::new(
-                    [sort_expr, sort_expr_row_id].into(),
-                    ann_node,
-                )
-                .with_fetch(Some(q.k * over_fetch_factor as usize)),
+                SortExec::new([sort_expr, sort_expr_row_id].into(), ann_node)
+                    .with_fetch(Some(q.k * over_fetch_factor as usize)),
             );
             ann_nodes.push(ann_node as Arc<dyn ExecutionPlan>);
         }
@@ -3319,11 +3315,8 @@ impl Scanner {
             },
         };
         let ann_node = Arc::new(
-            SortExec::new(
-                [sort_expr, sort_expr_row_id].into(),
-                ann_node,
-            )
-            .with_fetch(Some(q.k * q.refine_factor.unwrap_or(1) as usize)),
+            SortExec::new([sort_expr, sort_expr_row_id].into(), ann_node)
+                .with_fetch(Some(q.k * q.refine_factor.unwrap_or(1) as usize)),
         );
 
         Ok(ann_node)

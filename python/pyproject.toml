@@ -61,6 +61,9 @@ tests = [
     "tensorflow<=2.19.0",
     "tqdm",
     "datafusion",
+    "geoarrow-rust-core",
+    "geoarrow-rust-compute",
+    "geoarrow-rust-io",
 ]
 dev = ["ruff==0.4.1", "pyright"]
 benchmarks = ["pytest-benchmark"]

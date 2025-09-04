@@ -36,6 +36,7 @@ pub mod inverted;
 pub mod label_list;
 pub mod lance_format;
 pub mod ngram;
+pub mod rtree;
 pub mod zonemap;
 
 use crate::frag_reuse::FragReuseIndex;
@@ -51,6 +52,8 @@ pub enum ScalarIndexType {
     NGram,
     ZoneMap,
     Inverted,
+    // TODO[GEO] add geo index
+    RTree,
 }
 
 impl TryFrom<IndexType> for ScalarIndexType {
@@ -64,6 +67,7 @@ impl TryFrom<IndexType> for ScalarIndexType {
             IndexType::NGram => Ok(Self::NGram),
             IndexType::ZoneMap => Ok(Self::ZoneMap),
             IndexType::Inverted => Ok(Self::Inverted),
+            IndexType::RTree => Ok(Self::RTree),
             _ => Err(Error::InvalidInput {
                 source: format!("Index type {:?} is not a scalar index", value).into(),
                 location: location!(),
@@ -81,6 +85,7 @@ impl From<ScalarIndexType> for IndexType {
             ScalarIndexType::NGram => Self::NGram,
             ScalarIndexType::ZoneMap => Self::ZoneMap,
             ScalarIndexType::Inverted => Self::Inverted,
+            ScalarIndexType::RTree => Self::RTree,
         }
     }
 }
@@ -112,6 +117,7 @@ impl IndexParams for ScalarIndexParams {
             Some(ScalarIndexType::Inverted) => IndexType::Inverted,
             Some(ScalarIndexType::NGram) => IndexType::NGram,
             Some(ScalarIndexType::ZoneMap) => IndexType::ZoneMap,
+            Some(ScalarIndexType::RTree) => IndexType::RTree,
         }
     }
 

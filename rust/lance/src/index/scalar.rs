@@ -37,6 +37,7 @@ use lance_index::{
         inverted::{train_inverted_index, InvertedIndex, INVERT_LIST_FILE},
         label_list::{train_label_list_index, LabelListIndex},
         lance_format::LanceIndexStore,
+        rtree::train_rtree_index,
         ScalarIndex, ScalarIndexParams, ScalarIndexType,
     },
     IndexType,
@@ -240,6 +241,11 @@ fn zonemap_index_details() -> prost_types::Any {
     prost_types::Any::from_msg(&details).unwrap()
 }
 
+fn rtree_index_details() -> prost_types::Any {
+    let details = lance_table::format::pb::RTreeIndexDetails {};
+    prost_types::Any::from_msg(&details).unwrap()
+}
+
 pub(super) fn inverted_index_details() -> prost_types::Any {
     let details = lance_table::format::pb::InvertedIndexDetails::default();
     prost_types::Any::from_msg(&details).unwrap()
@@ -281,6 +287,12 @@ impl ScalarIndexDetails for lance_table::format::pb::ZoneMapIndexDetails {
     }
 }
 
+impl ScalarIndexDetails for lance_table::format::pb::RTreeIndexDetails {
+    fn get_type(&self) -> ScalarIndexType {
+        ScalarIndexType::RTree
+    }
+}
+
 fn get_scalar_index_details(
     details: &prost_types::Any,
 ) -> Result<Option<Box<dyn ScalarIndexDetails>>> {
@@ -307,6 +319,10 @@ fn get_scalar_index_details(
     } else if details.type_url.ends_with("ZoneMapIndexDetails") {
         Ok(Some(Box::new(
             details.to_msg::<lance_table::format::pb::ZoneMapIndexDetails>()?,
+        )))
+    } else if details.type_url.ends_with("RTreeIndexDetails") {
+        Ok(Some(Box::new(
+            details.to_msg::<lance_table::format::pb::RTreeIndexDetails>()?,
         )))
     } else {
         Ok(None)
@@ -364,7 +380,7 @@ pub(super) async fn build_scalar_index(
 
     // In theory it should be possible to create a btree/bitmap index on a nested field but
     // performance would be poor and I'm not sure we want to allow that unless there is a need.
-    if !matches!(params.force_index_type, Some(ScalarIndexType::LabelList))
+    if !matches!(params.force_index_type, Some(ScalarIndexType::LabelList | ScalarIndexType::RTree))
         && field.data_type().is_nested()
     {
         return Err(Error::InvalidInput {
@@ -372,6 +388,9 @@ pub(super) async fn build_scalar_index(
             location: location!(),
         });
     }
+
+    // TODO[GEO] Checking geo indexes can only be used on geo types
+
     let index_store = LanceIndexStore::from_dataset(dataset, uuid);
     match params.force_index_type {
         Some(ScalarIndexType::Bitmap) => {
@@ -405,6 +424,10 @@ pub(super) async fn build_scalar_index(
             // TODO: Add type check for zone map index
             train_zonemap_index(training_request, &index_store, None).await?;
             Ok(zonemap_index_details())
+        }
+        Some(ScalarIndexType::RTree) => {
+            train_rtree_index(training_request, &index_store).await?;
+            Ok(rtree_index_details())
         }
         _ => {
             let flat_index_trainer = FlatIndexMetadata::new(field.data_type());

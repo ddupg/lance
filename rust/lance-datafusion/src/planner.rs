@@ -30,7 +30,9 @@ use datafusion::logical_expr::{
     Signature, Volatility, WindowUDF,
 };
 use datafusion::optimizer::simplify_expressions::SimplifyContext;
-use datafusion::sql::planner::{ContextProvider, NullOrdering, ParserOptions, PlannerContext, SqlToRel};
+use datafusion::sql::planner::{
+    ContextProvider, NullOrdering, ParserOptions, PlannerContext, SqlToRel,
+};
 use datafusion::sql::sqlparser::ast::{
     AccessExpr, Array as SQLArray, BinaryOperator, DataType as SQLDataType, ExactNumberInfo,
     Expr as SQLExpr, Function, FunctionArg, FunctionArgExpr, FunctionArguments, Ident,

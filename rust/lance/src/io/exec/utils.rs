@@ -431,6 +431,7 @@ mod tests {
 
     use arrow_array::{types::UInt32Type, RecordBatchReader};
     use arrow_schema::SortOptions;
+    use datafusion::common::NullEquality;
     use datafusion::{
         logical_expr::JoinType,
         physical_expr::expressions::Column,
@@ -438,7 +439,6 @@ mod tests {
             joins::SortMergeJoinExec, stream::RecordBatchStreamAdapter, ExecutionPlan,
         },
     };
-    use datafusion::common::NullEquality;
     use futures::{StreamExt, TryStreamExt};
     use lance_core::utils::futures::Capacity;
     use lance_datafusion::exec::OneShotExec;

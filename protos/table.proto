@@ -375,6 +375,7 @@ message InvertedIndexDetails {}
 message NGramIndexDetails {}
 message ZoneMapIndexDetails {}
 message VectorIndexDetails {}
+message RTreeIndexDetails {}
 
 message FragmentReuseIndexDetails {
 

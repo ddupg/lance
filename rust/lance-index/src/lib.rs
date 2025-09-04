@@ -98,6 +98,8 @@ pub enum IndexType {
 
     ZoneMap = 8, // ZoneMap
 
+    RTree = 9, // RTree
+
     // 100+ and up for vector index.
     /// Flat vector index.
     Vector = 100, // Legacy vector index, alias to IvfPq
@@ -120,6 +122,7 @@ impl std::fmt::Display for IndexType {
             Self::FragmentReuse => write!(f, "FragmentReuse"),
             Self::MemWal => write!(f, "MemWal"),
             Self::ZoneMap => write!(f, "ZoneMap"),
+            Self::RTree => write!(f, "RTree"),
             Self::Vector | Self::IvfPq => write!(f, "IVF_PQ"),
             Self::IvfFlat => write!(f, "IVF_FLAT"),
             Self::IvfSq => write!(f, "IVF_SQ"),
@@ -206,6 +209,7 @@ impl IndexType {
             Self::FragmentReuse => 0,
             Self::MemWal => 0,
             Self::ZoneMap => 0,
+            Self::RTree => 0,
 
             // for now all vector indices are built by the same builder,
             // so they share the same version.
