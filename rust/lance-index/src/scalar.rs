@@ -39,6 +39,7 @@ pub mod label_list;
 pub mod lance_format;
 pub mod ngram;
 pub mod registry;
+pub mod rtree;
 pub mod zonemap;
 
 use crate::frag_reuse::FragReuseIndex;
@@ -86,6 +87,7 @@ impl TryFrom<IndexType> for BuiltinIndexType {
             IndexType::NGram => Ok(Self::NGram),
             IndexType::ZoneMap => Ok(Self::ZoneMap),
             IndexType::Inverted => Ok(Self::Inverted),
+            IndexType::RTree => Ok(Self::RTree),
             _ => Err(Error::Index {
                 message: "Invalid index type".to_string(),
                 location: location!(),
