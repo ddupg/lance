@@ -26,6 +26,8 @@ use num_traits::Bounded;
 use snafu::location;
 use std::any::Any;
 use std::sync::{Arc, LazyLock};
+use async_trait::async_trait;
+use crate::scalar::rtree::sort::Sorter;
 
 const HILBERT_FIELD_NAME: &str = "_hilbert";
 
@@ -63,12 +65,15 @@ impl HilbertSorter {
             }),
         }
     }
+}
 
-    pub(crate) async fn sort(
+#[async_trait]
+impl Sorter for HilbertSorter {
+    async fn sort(
         &self,
         mut data: SendableRecordBatchStream,
     ) -> Result<SendableRecordBatchStream> {
-        // 第一阶段：遍历数据，统计全局bbox并溢出到磁盘
+        // 1. Scan source data statistics bbox, and spill data to disk
         let mut writer = self
             .spill_store
             .new_index_file(self.tmp_spill_filename(), BBOX_ROWID_SCHEMA.clone())
@@ -111,7 +116,7 @@ impl HilbertSorter {
             stream,
         ))));
 
-        // 2. 创建投影，添加_hilbert列
+        // 2. Add _hilbert column
         let mut projection_exprs = BBOX_ROWID_SCHEMA
             .fields()
             .iter()
@@ -161,7 +166,7 @@ impl HilbertSorter {
         Ok(sorted_stream)
     }
 
-    pub async fn cleanup(&mut self) -> Result<()> {
+    async fn cleanup(&self) -> Result<()> {
         self.spill_store.delete_index_file(self.tmp_spill_filename()).await
     }
 }
