@@ -1188,7 +1188,7 @@ impl Dataset {
             .await
     }
 
-    pub fn object_store(&self) -> &ObjectStore {
+    pub(crate) fn object_store(&self) -> &ObjectStore {
         &self.object_store
     }
 
@@ -1196,7 +1196,7 @@ impl Dataset {
         self.base.child(DATA_DIR)
     }
 
-    pub fn indices_dir(&self) -> Path {
+    pub(crate) fn indices_dir(&self) -> Path {
         self.base.child(INDICES_DIR)
     }
 
@@ -1386,7 +1386,7 @@ impl Dataset {
 
     // Gets a filtered list of fragments from ids in O(N) time instead of using
     // `get_fragment` which would require O(N^2) time.
-    pub fn get_frags_from_ordered_ids(&self, ordered_ids: &[u32]) -> Vec<Option<FileFragment>> {
+    fn get_frags_from_ordered_ids(&self, ordered_ids: &[u32]) -> Vec<Option<FileFragment>> {
         let mut fragments = Vec::with_capacity(ordered_ids.len());
         let mut id_iter = ordered_ids.iter();
         let mut id = id_iter.next();
@@ -2182,7 +2182,7 @@ mod tests {
     use arrow_array::{
         builder::StringDictionaryBuilder,
         cast::as_string_array,
-        types::{Float32Type, Float64Type, Int32Type},
+        types::{Float32Type, Int32Type, Float64Type},
         ArrayRef, DictionaryArray, Float32Array, Int32Array, Int64Array, Int8Array,
         Int8DictionaryArray, ListArray, RecordBatchIterator, StringArray, UInt16Array, UInt32Array,
     };
@@ -7802,21 +7802,20 @@ mod tests {
     #[tokio::test]
     async fn test_geo_types() {
         use geo_types::{coord, line_string, Rect};
-        use geoarrow_array::{
-            builder::{LineStringBuilder, PointBuilder, PolygonBuilder},
-            GeoArrowArray,
+        use geoarrow::array::{LineStringBuilder, PointBuilder, PolygonBuilder};
+        use geoarrow::datatypes::{
+            Dimension, GeoArrowType, LineStringType, PointType, PolygonType,
         };
-        use geoarrow_schema::{Dimension, LineStringType, PointType, PolygonType};
+        use geoarrow_array::GeoArrowArray;
 
-        // 1. Creates arrow table with spatial data.
         let point_type = PointType::new(Dimension::XY, Default::default());
         let line_string_type = LineStringType::new(Dimension::XY, Default::default());
         let polygon_type = PolygonType::new(Dimension::XY, Default::default());
 
         let schema = arrow_schema::Schema::new(vec![
-            point_type.clone().to_field("point", true),
-            line_string_type.clone().to_field("linestring", true),
-            polygon_type.clone().to_field("polygon", true),
+            GeoArrowType::from(point_type.clone()).to_field("point", true),
+            GeoArrowType::from(line_string_type.clone()).to_field("linestring", true),
+            GeoArrowType::from(polygon_type.clone()).to_field("polygon", true),
         ]);
         let schema = Arc::new(schema) as arrow_schema::SchemaRef;
 
@@ -7852,7 +7851,7 @@ mod tests {
         )
         .unwrap();
 
-        // 2. Write to lance
+        // write to lance
         let lance_path = tempdir().unwrap();
         let uri = lance_path.path().to_str().unwrap();
         let reader = RecordBatchIterator::new(vec![batch].into_iter().map(Ok), schema.clone());
@@ -7860,7 +7859,6 @@ mod tests {
             .await
             .unwrap();
 
-        // 3. Verifies that the schema fields and extension metadata are preserved
         assert_eq!(dataset.schema().fields.len(), 3);
         let fields = &dataset.schema().fields;
         assert_eq!(
@@ -7880,19 +7878,17 @@ mod tests {
     #[tokio::test]
     async fn test_geo_sql() {
         use geo_types::line_string;
-        use geoarrow_array::{
-            builder::{LineStringBuilder, PointBuilder},
-            GeoArrowArray,
-        };
-        use geoarrow_schema::{Dimension, GeoArrowType, LineStringType, PointType};
+        use geoarrow::array::{LineStringBuilder, PointBuilder};
+        use geoarrow::datatypes::{Dimension, GeoArrowType, LineStringType, PointType};
+        use geoarrow_array::GeoArrowArray;
 
-        // 1. Creates arrow table with point and linestring spatial data
+        // 1. build arrow table
         let point_type = PointType::new(Dimension::XY, Default::default());
         let line_string_type = LineStringType::new(Dimension::XY, Default::default());
 
         let schema = arrow_schema::Schema::new(vec![
-            point_type.clone().to_field("point", true),
-            line_string_type.clone().to_field("linestring", true),
+            GeoArrowType::from(point_type.clone()).to_field("point", true),
+            GeoArrowType::from(line_string_type.clone()).to_field("linestring", true),
         ]);
         let schema = Arc::new(schema) as arrow_schema::SchemaRef;
 
@@ -7916,10 +7912,10 @@ mod tests {
         )
         .unwrap();
 
-        // 2. Write to lance
+        // 2. write to lance
         let lance_path = tempdir().unwrap();
         let reader = RecordBatchIterator::new(vec![batch].into_iter().map(Ok), schema.clone());
-        let dataset = Dataset::write(
+        let mut dataset = Dataset::write(
             reader,
             lance_path.path().to_str().unwrap(),
             Some(Default::default()),
@@ -7927,14 +7923,15 @@ mod tests {
         .await
         .unwrap();
 
-        // 3. Executes a SQL query with St_Distance function
-        let batches = execute_sql(
-            "SELECT ST_Distance(point, linestring) AS dist FROM dataset",
-            "dataset".to_owned(),
-            Arc::new(dataset.clone()),
-        )
-        .await
-        .unwrap();
+        // 3. query lance with SQL
+        let batches = dataset
+            .sql("SELECT ST_Distance(point, linestring) AS dist FROM dataset")
+            .build()
+            .await
+            .unwrap()
+            .into_batch_records()
+            .await
+            .unwrap();
         assert_eq!(batches.len(), 1);
         let batch = batches.get(0).unwrap();
         assert_eq!(batch.num_columns(), 1);

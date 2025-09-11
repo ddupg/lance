@@ -4297,6 +4297,7 @@ dependencies = [
  "dirs",
  "fst",
  "futures",
+ "geoarrow-schema 0.5.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "half",
  "itertools 0.13.0",
  "jieba-rs",

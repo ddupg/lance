@@ -1,8 +1,11 @@
 // SPDX-FileCopyrightText: Copyright The Lance Authors
 
-use crate::scalar::btree::TrainingSource;
+use crate::frag_reuse::FragReuseIndex;
+use crate::pb;
+use crate::scalar::expression::ScalarQueryParser;
+use crate::scalar::registry::{DefaultTrainingRequest, ScalarIndexPlugin, TrainingCriteria, TrainingOrdering, TrainingRequest, VALUE_COLUMN_NAME};
 use crate::scalar::rtree::str_sort::STRSortExec;
-use crate::scalar::{IndexStore, IndexWriter};
+use crate::scalar::{CreatedIndex, IndexStore, IndexWriter, ScalarIndex};
 use arrow_array::{Array, Float64Array, RecordBatch};
 use arrow_schema::{DataType, Field, Schema};
 use async_trait::async_trait;
@@ -10,18 +13,27 @@ use datafusion::execution::SendableRecordBatchStream;
 use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
 use datafusion_common::DataFusionError;
 use futures::TryStreamExt;
-use lance_core::{Error, Result};
+use lance_core::cache::LanceCache;
+use lance_core::{Error, Result, ROW_ID};
 use lance_datafusion::exec::{execute_plan, LanceExecutionOptions, OneShotExec};
 use num_traits::Bounded;
 use snafu::location;
+use std::collections::BTreeMap;
 use std::sync::{Arc, LazyLock};
+use object_store::path::Path;
+use tempfile::{tempdir, TempDir};
+use lance_io::object_store::ObjectStore;
+use crate::scalar::lance_format::LanceIndexStore;
+use crate::scalar::rtree::hilbert_sort::HilbertSorter;
 
 pub mod str_sort;
+mod hilbert_sort;
 
 const DEFAULT_RTREE_PAGE_SIZE: u32 = 4096;
 const RTREE_LOOKUP_NAME: &str = "page_lookup.lance";
 const RTREE_PAGES_NAME: &str = "page_data.lance";
 const BATCH_SIZE_META_KEY: &str = "batch_size";
+const RTREE_INDEX_VERSION: u32 = 0;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct RTreeMetadata {
@@ -213,15 +225,9 @@ fn extract_point_bboxes(x_array: &dyn Array, y_array: &dyn Array) -> Result<Vec<
 /// and re-chunking into page-size batches.  This is left for simplicity as this feature is still
 /// a work in progress
 pub async fn train_rtree_index(
-    data_source: Box<dyn TrainingSource + Send>,
+    data_source: SendableRecordBatchStream,
     index_store: &dyn IndexStore,
 ) -> Result<()> {
-    let data_source = Box::new(RTreeDataSource::new(data_source));
-
-    let mut batch_stream = data_source
-        .scan_ordered_chunks(DEFAULT_RTREE_PAGE_SIZE)
-        .await?;
-
     // TODO: write data/metadata
     Ok(())
 }
@@ -236,96 +242,229 @@ pub static BBOX_SCHEMA: LazyLock<Arc<Schema>> = LazyLock::new(|| {
     ]))
 });
 
-struct RTreeDataSource {
-    source: Box<dyn TrainingSource>,
+fn convert_bbox_stream(source: SendableRecordBatchStream) -> Result<SendableRecordBatchStream> {
+    // 创建一个流，将原始数据转换为边界框
+    let bbox_stream = source
+        .map_err(DataFusionError::into)
+        .and_then(move |batch| async move {
+            let schema = batch.schema();
+            let geometry_field = schema.field(0);
+            let geometry_array = batch.column(0);
+
+            // 提取边界框
+            let bboxes = extract_bounding_boxes(geometry_field, geometry_array.as_ref())?;
+
+            // 创建边界框字段的数组
+            let min_x_values: Vec<f64> = bboxes.iter().map(|bbox| bbox.min_x).collect();
+            let min_y_values: Vec<f64> = bboxes.iter().map(|bbox| bbox.min_y).collect();
+            let max_x_values: Vec<f64> = bboxes.iter().map(|bbox| bbox.max_x).collect();
+            let max_y_values: Vec<f64> = bboxes.iter().map(|bbox| bbox.max_y).collect();
+
+            // 获取row_id列
+            let row_ids = batch.column(1).clone();
+
+            // 创建新的记录批次
+            RecordBatch::try_new(
+                BBOX_SCHEMA.clone(),
+                vec![
+                    Arc::new(Float64Array::from(min_x_values)),
+                    Arc::new(Float64Array::from(min_y_values)),
+                    Arc::new(Float64Array::from(max_x_values)),
+                    Arc::new(Float64Array::from(max_y_values)),
+                    row_ids,
+                ],
+            )
+            .map_err(DataFusionError::from)
+        });
+
+    Ok(Box::pin(RecordBatchStreamAdapter::new(
+        BBOX_SCHEMA.clone(),
+        bbox_stream,
+    )))
 }
 
-impl RTreeDataSource {
-    fn new(source: Box<dyn TrainingSource>) -> Self {
-        Self { source }
+
+// #[async_trait]
+// impl RTreeDataSource {
+//     async fn scan_ordered_chunks(
+//         self: Box<Self>,
+//         chunk_size: u32,
+//     ) -> Result<SendableRecordBatchStream> {
+//         // 读取原始数据
+//         let stream = self.source.scan_unordered_chunks(chunk_size).await?;
+//
+//         let bbox_stream = Self::convert_bbox_stream(stream)?;
+//
+//         // 使用RecordBatchStreamAdapter创建符合RecordBatchStream要求的流
+//         let input = Arc::new(OneShotExec::new(bbox_stream));
+//
+//         // 执行排序计划
+//         let sorted_stream = execute_plan(
+//             Arc::new(STRSortExec::try_new(input, chunk_size, 1 << 30)?),
+//             LanceExecutionOptions {
+//                 use_spilling: true,
+//                 ..Default::default()
+//             },
+//         )?;
+//
+//         // 返回排序后的流
+//         Ok(sorted_stream)
+//     }
+// }
+
+#[derive(Debug, Clone)]
+pub struct RTreeIndexBuilderOptions {}
+
+impl Default for RTreeIndexBuilderOptions {
+    fn default() -> RTreeIndexBuilderOptions {
+        RTreeIndexBuilderOptions {}
+    }
+}
+
+pub struct RTreeIndexBuilder {
+    options: RTreeIndexBuilderOptions,
+    tmpdir: Arc<TempDir>,
+    spill_store: Arc<dyn IndexStore>,
+}
+
+impl RTreeIndexBuilder {
+    pub fn try_new(options: RTreeIndexBuilderOptions) -> Result<Self> {
+        let tmpdir = Arc::new(tempdir()?);
+        let spill_store = Arc::new(LanceIndexStore::new(
+            Arc::new(ObjectStore::local()),
+            Path::from_filesystem_path(tmpdir.path())?,
+            Arc::new(LanceCache::no_cache()),
+        ));
+
+        Ok(Self {
+            options,
+            tmpdir,
+            spill_store,
+        })
     }
 
-    fn convert_bbox_stream(source: SendableRecordBatchStream) -> Result<SendableRecordBatchStream> {
-        // 创建一个流，将原始数据转换为边界框
-        let bbox_stream = source
-            .map_err(DataFusionError::into)
-            .and_then(move |batch| async move {
-                let schema = batch.schema();
-                let geometry_field = schema.field(0);
-                let geometry_array = batch.column(0);
+    fn validate_value_field(field: &Field) -> Result<()> {
+        field.metadata().get("ARROW:extension:name")
+            .filter(|v| v.starts_with("geoarrow."))
+            .ok_or_else(|| Error::InvalidInput {
+                source: "Field must have a geoarrow extension type".into(),
+                location: location!()
+            })?;
+        Ok(())
+    }
 
-                // 提取边界框
-                let bboxes = extract_bounding_boxes(geometry_field, geometry_array.as_ref())?;
-
-                // 创建边界框字段的数组
-                let min_x_values: Vec<f64> = bboxes.iter().map(|bbox| bbox.min_x).collect();
-                let min_y_values: Vec<f64> = bboxes.iter().map(|bbox| bbox.min_y).collect();
-                let max_x_values: Vec<f64> = bboxes.iter().map(|bbox| bbox.max_x).collect();
-                let max_y_values: Vec<f64> = bboxes.iter().map(|bbox| bbox.max_y).collect();
-
-                // 获取row_id列
-                let row_ids = batch.column(1).clone();
-
-                // 创建新的记录批次
-                RecordBatch::try_new(
-                    BBOX_SCHEMA.clone(),
-                    vec![
-                        Arc::new(Float64Array::from(min_x_values)),
-                        Arc::new(Float64Array::from(min_y_values)),
-                        Arc::new(Float64Array::from(max_x_values)),
-                        Arc::new(Float64Array::from(max_y_values)),
-                        row_ids,
-                    ],
-                )
-                .map_err(DataFusionError::from)
+    fn validate_schema(schema: &Schema) -> Result<()> {
+        if schema.fields().len() != 2 {
+            return Err(Error::InvalidInput {
+                source: "RTree index schema must have exactly two fields".into(),
+                location: location!(),
             });
+        }
+        let values_field = schema.field_with_name(VALUE_COLUMN_NAME)?;
+        Self::validate_value_field(values_field)?;
 
-        Ok(Box::pin(RecordBatchStreamAdapter::new(
-            BBOX_SCHEMA.clone(),
-            bbox_stream,
-        )))
+        let row_id_field = schema.field_with_name(ROW_ID)?;
+        if *row_id_field.data_type() != DataType::UInt64 {
+            return Err(Error::InvalidInput {
+                source: "Second field in RTree index schema must be of type UInt64".into(),
+                location: location!(),
+            });
+        }
+        Ok(())
+    }
+
+    pub async fn train(&mut self, data: SendableRecordBatchStream) -> Result<()> {
+        let schema = data.schema();
+        Self::validate_schema(schema.as_ref())?;
+
+        let bbox_data = convert_bbox_stream(data)?;
+        // new sorted stream
+        let sorter = HilbertSorter::new(DEFAULT_RTREE_PAGE_SIZE, self.spill_store.clone());
+        let sorted_data = sorter.sort(bbox_data).await?;
+
+        // tree node stream, leaf node and branch node
+
+        todo!()
+    }
+
+    pub async fn write_index(
+        mut self,
+        store: &dyn IndexStore,
+        old_index: Option<Arc<dyn IndexStore>>,
+    ) -> Result<()> {
+        todo!()
+    }
+}
+
+#[derive(Debug, Default)]
+pub struct RTreeIndexPlugin;
+
+impl RTreeIndexPlugin {
+    pub async fn train_rtree_index(
+        batches_source: SendableRecordBatchStream,
+        index_store: &dyn IndexStore,
+    ) -> Result<()> {
+
+        let mut builder = RTreeIndexBuilder::try_new(RTreeIndexBuilderOptions::default())?;
+
+        builder.train(batches_source).await?;
+
+        builder.write_index(index_store, None).await
     }
 }
 
 #[async_trait]
-impl TrainingSource for RTreeDataSource {
-    async fn scan_ordered_chunks(
-        self: Box<Self>,
-        chunk_size: u32,
-    ) -> Result<SendableRecordBatchStream> {
-        // 读取原始数据
-        let stream = self.source.scan_unordered_chunks(chunk_size).await?;
+impl ScalarIndexPlugin for RTreeIndexPlugin {
+    fn new_training_request(
+        &self,
+        params: &str,
+        field: &Field,
+    ) -> Result<Box<dyn TrainingRequest>> {
+        // Check if field has geoarrow extension type
+        RTreeIndexBuilder::validate_value_field(field)?;
 
-        let bbox_stream = Self::convert_bbox_stream(stream)?;
-
-        // 使用RecordBatchStreamAdapter创建符合RecordBatchStream要求的流
-        let input = Arc::new(OneShotExec::new(bbox_stream));
-
-        // 执行排序计划
-        let sorted_stream = execute_plan(
-            Arc::new(STRSortExec::try_new(input, chunk_size, 1 << 30)?),
-            LanceExecutionOptions {
-                use_spilling: true,
-                ..Default::default()
-            },
-        )?;
-
-        // 返回排序后的流
-        Ok(sorted_stream)
+        Ok(Box::new(DefaultTrainingRequest::new(
+            TrainingCriteria::new(TrainingOrdering::None).with_row_id(),
+        )))
     }
 
-    async fn scan_unordered_chunks(
-        self: Box<Self>,
-        _chunk_size: u32,
-    ) -> Result<SendableRecordBatchStream> {
-        unimplemented!()
+    async fn train_index(
+        &self,
+        data: SendableRecordBatchStream,
+        index_store: &dyn IndexStore,
+        _request: Box<dyn TrainingRequest>,
+    ) -> Result<CreatedIndex> {
+        Self::train_rtree_index(data, index_store).await?;
+        Ok(CreatedIndex {
+            index_details: prost_types::Any::from_msg(&pb::RTreeIndexDetails::default())?,
+            index_version: RTREE_INDEX_VERSION,
+        })
     }
 
-    async fn scan_aligned_chunks(
-        self: Box<Self>,
-        _chunk_size: u32,
-    ) -> Result<SendableRecordBatchStream> {
-        unimplemented!()
+    fn provides_exact_answer(&self) -> bool {
+        todo!()
+    }
+
+    fn version(&self) -> u32 {
+        0
+    }
+
+    fn new_query_parser(
+        &self,
+        index_name: String,
+        index_details: &prost_types::Any,
+    ) -> Option<Box<dyn ScalarQueryParser>> {
+        todo!()
+    }
+
+    async fn load_index(
+        &self,
+        index_store: Arc<dyn IndexStore>,
+        index_details: &prost_types::Any,
+        frag_reuse_index: Option<Arc<FragReuseIndex>>,
+        cache: LanceCache,
+    ) -> Result<Arc<dyn ScalarIndex>> {
+        todo!()
     }
 }
 
@@ -361,14 +500,21 @@ fn analyze_batch(batch: &RecordBatch) -> Result<BoundingBox> {
     let max_y = column_mapping(3);
     let (min_x, min_y, max_x, max_y) = match (min_x, min_y, max_x, max_y) {
         (Some(a), Some(b), Some(c), Some(d)) => (a, b, c, d),
-        _ => return Err(Error::Arrow {
-            message: "BBOX_SCHEMA must be Float64 columns (min_x,min_y,max_x,max_y)".into(),
-            location: location!(),
-        }),
+        _ => {
+            return Err(Error::Arrow {
+                message: "BBOX_SCHEMA must be Float64 columns (min_x,min_y,max_x,max_y)".into(),
+                location: location!(),
+            })
+        }
     };
     let len = min_x.len();
     for i in 0..len {
-        bbox.update(min_x.value(i), min_y.value(i), max_x.value(i), max_y.value(i));
+        bbox.update(
+            min_x.value(i),
+            min_y.value(i),
+            max_x.value(i),
+            max_y.value(i),
+        );
     }
     Ok(bbox)
 }

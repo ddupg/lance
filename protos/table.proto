@@ -396,7 +396,6 @@ message ExternalFile {
 
 // Empty details messages for older indexes that don't take advantage of the details field.
 message VectorIndexDetails {}
-message RTreeIndexDetails {}
 
 message FragmentReuseIndexDetails {
 
