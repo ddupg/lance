@@ -12,7 +12,7 @@
 use std::any::Any;
 use std::sync::Arc;
 
-use crate::scalar::rtree::BBOX_SCHEMA;
+use crate::scalar::rtree::{BBOX_ROWID_SCHEMA, BBOX_SCHEMA};
 use arrow_array::{ArrayRef, Float64Array, RecordBatch};
 use arrow_schema::{DataType as ArrowDataType, Field as ArrowField, Schema as ArrowSchema};
 use datafusion::common::Result as DataFusionResult;
@@ -97,7 +97,7 @@ impl ExecutionPlan for STRSortExec {
     }
 
     fn schema(&self) -> Arc<ArrowSchema> {
-        BBOX_SCHEMA.clone()
+        BBOX_ROWID_SCHEMA.clone()
     }
 
     fn properties(&self) -> &PlanProperties {

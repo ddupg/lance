@@ -14,13 +14,12 @@ use async_trait::async_trait;
 use datafusion::functions::string::contains::ContainsFunc;
 use datafusion::functions_array::array_has;
 use datafusion::physical_plan::SendableRecordBatchStream;
-use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
-use datafusion_common::{scalar::ScalarValue, Column, DataFusionError};
+use datafusion_common::{scalar::ScalarValue, Column};
 
 use datafusion_expr::expr::ScalarFunction;
 use datafusion_expr::Expr;
 use deepsize::DeepSizeOf;
-use futures::{future::BoxFuture, FutureExt, Stream, StreamExt, TryFutureExt};
+use futures::{future::BoxFuture, FutureExt, Stream};
 use inverted::query::{fill_fts_query_column, FtsQuery, FtsQueryNode, FtsSearchParams, MatchQuery};
 use lance_core::utils::mask::RowIdTreeMap;
 use lance_core::{Error, Result};

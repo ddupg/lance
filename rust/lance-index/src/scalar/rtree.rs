@@ -3,31 +3,30 @@
 use crate::frag_reuse::FragReuseIndex;
 use crate::pb;
 use crate::scalar::expression::ScalarQueryParser;
-use crate::scalar::registry::{DefaultTrainingRequest, ScalarIndexPlugin, TrainingCriteria, TrainingOrdering, TrainingRequest, VALUE_COLUMN_NAME};
-use crate::scalar::rtree::str_sort::STRSortExec;
+use crate::scalar::lance_format::LanceIndexStore;
+use crate::scalar::registry::{
+    DefaultTrainingRequest, ScalarIndexPlugin, TrainingCriteria, TrainingOrdering, TrainingRequest,
+    VALUE_COLUMN_NAME,
+};
 use crate::scalar::{CreatedIndex, IndexStore, IndexWriter, ScalarIndex};
-use arrow_array::{Array, Float64Array, RecordBatch};
-use arrow_schema::{DataType, Field, Schema};
+use arrow_array::{new_null_array, Array, Float64Array, RecordBatch, UInt32Array};
+use arrow_schema::{DataType, Field as ArrowField, Schema as ArrowSchema};
 use async_trait::async_trait;
 use datafusion::execution::SendableRecordBatchStream;
 use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
 use datafusion_common::DataFusionError;
-use futures::TryStreamExt;
+use futures::{stream, StreamExt, TryStreamExt};
 use lance_core::cache::LanceCache;
 use lance_core::{Error, Result, ROW_ID};
-use lance_datafusion::exec::{execute_plan, LanceExecutionOptions, OneShotExec};
-use num_traits::Bounded;
-use snafu::location;
-use std::collections::BTreeMap;
-use std::sync::{Arc, LazyLock};
-use object_store::path::Path;
-use tempfile::{tempdir, TempDir};
 use lance_io::object_store::ObjectStore;
-use crate::scalar::lance_format::LanceIndexStore;
-use crate::scalar::rtree::hilbert_sort::HilbertSorter;
+use num_traits::Bounded;
+use object_store::path::Path;
+use snafu::location;
+use sort::hilbert_sort::HilbertSorter;
+use std::sync::{Arc, LazyLock};
+use tempfile::{tempdir, TempDir};
 
-pub mod str_sort;
-mod hilbert_sort;
+mod sort;
 
 const DEFAULT_RTREE_PAGE_SIZE: u32 = 4096;
 const RTREE_LOOKUP_NAME: &str = "page_lookup.lance";
@@ -113,7 +112,7 @@ pub struct RTree {
 /// This function handles struct<x: double, y: double> format for point data
 /// and extracts bounding boxes for spatial indexing.
 pub fn extract_bounding_boxes(
-    geometry_field: &Field,
+    geometry_field: &ArrowField,
     geometry_array: &dyn Array,
 ) -> Result<Vec<BoundingBox>> {
     use arrow_schema::DataType;
@@ -232,14 +231,32 @@ pub async fn train_rtree_index(
     Ok(())
 }
 
-pub static BBOX_SCHEMA: LazyLock<Arc<Schema>> = LazyLock::new(|| {
-    Arc::new(Schema::new(vec![
-        Field::new("min_x", DataType::Float64, false),
-        Field::new("min_y", DataType::Float64, false),
-        Field::new("max_x", DataType::Float64, false),
-        Field::new("max_y", DataType::Float64, false),
-        Field::new("_rowid", DataType::UInt64, true),
+pub static BBOX_SCHEMA: LazyLock<Arc<ArrowSchema>> = LazyLock::new(|| {
+    Arc::new(ArrowSchema::new(vec![
+        ArrowField::new("min_x", DataType::Float64, false),
+        ArrowField::new("min_y", DataType::Float64, false),
+        ArrowField::new("max_x", DataType::Float64, false),
+        ArrowField::new("max_y", DataType::Float64, false),
     ]))
+});
+pub static BBOX_ROWID_SCHEMA: LazyLock<Arc<ArrowSchema>> = LazyLock::new(|| {
+    let mut fields = BBOX_SCHEMA.fields().iter().cloned().collect::<Vec<_>>();
+    fields.push(Arc::new(ArrowField::new(ROW_ID, DataType::UInt64, true)));
+    Arc::new(ArrowSchema::new(fields))
+});
+const PAGE_ID_COLUMN: &str = "_page_id";
+pub static RTREE_PAGE_SCHEMA: LazyLock<Arc<ArrowSchema>> = LazyLock::new(|| {
+    let mut fields = BBOX_ROWID_SCHEMA
+        .fields()
+        .iter()
+        .cloned()
+        .collect::<Vec<_>>();
+    fields.push(Arc::new(ArrowField::new(
+        PAGE_ID_COLUMN,
+        DataType::UInt64,
+        true,
+    )));
+    Arc::new(ArrowSchema::new(fields))
 });
 
 fn convert_bbox_stream(source: SendableRecordBatchStream) -> Result<SendableRecordBatchStream> {
@@ -265,7 +282,7 @@ fn convert_bbox_stream(source: SendableRecordBatchStream) -> Result<SendableReco
 
             // 创建新的记录批次
             RecordBatch::try_new(
-                BBOX_SCHEMA.clone(),
+                BBOX_ROWID_SCHEMA.clone(),
                 vec![
                     Arc::new(Float64Array::from(min_x_values)),
                     Arc::new(Float64Array::from(min_y_values)),
@@ -278,11 +295,10 @@ fn convert_bbox_stream(source: SendableRecordBatchStream) -> Result<SendableReco
         });
 
     Ok(Box::pin(RecordBatchStreamAdapter::new(
-        BBOX_SCHEMA.clone(),
+        BBOX_ROWID_SCHEMA.clone(),
         bbox_stream,
     )))
 }
-
 
 // #[async_trait]
 // impl RTreeDataSource {
@@ -343,17 +359,19 @@ impl RTreeIndexBuilder {
         })
     }
 
-    fn validate_value_field(field: &Field) -> Result<()> {
-        field.metadata().get("ARROW:extension:name")
+    fn validate_value_field(field: &ArrowField) -> Result<()> {
+        field
+            .metadata()
+            .get("ARROW:extension:name")
             .filter(|v| v.starts_with("geoarrow."))
             .ok_or_else(|| Error::InvalidInput {
                 source: "Field must have a geoarrow extension type".into(),
-                location: location!()
+                location: location!(),
             })?;
         Ok(())
     }
 
-    fn validate_schema(schema: &Schema) -> Result<()> {
+    fn validate_schema(schema: &ArrowSchema) -> Result<()> {
         if schema.fields().len() != 2 {
             return Err(Error::InvalidInput {
                 source: "RTree index schema must have exactly two fields".into(),
@@ -373,7 +391,11 @@ impl RTreeIndexBuilder {
         Ok(())
     }
 
-    pub async fn train(&mut self, data: SendableRecordBatchStream) -> Result<()> {
+    pub async fn train(
+        &mut self,
+        data: SendableRecordBatchStream,
+        store: &dyn IndexStore,
+    ) -> Result<()> {
         let schema = data.schema();
         Self::validate_schema(schema.as_ref())?;
 
@@ -382,43 +404,51 @@ impl RTreeIndexBuilder {
         let sorter = HilbertSorter::new(DEFAULT_RTREE_PAGE_SIZE, self.spill_store.clone());
         let sorted_data = sorter.sort(bbox_data).await?;
 
-        // tree node stream, leaf node and branch node
+        self.write_index(sorted_data, store, DEFAULT_RTREE_PAGE_SIZE).await?;
 
-        todo!()
+        Ok(())
     }
 
     pub async fn write_index(
-        mut self,
+        &mut self,
+        sorted_data: SendableRecordBatchStream,
         store: &dyn IndexStore,
-        old_index: Option<Arc<dyn IndexStore>>,
+        page_size: u32,
     ) -> Result<()> {
-        todo!()
+        let mut batch_idx: u32 = 0;
+        let mut writer = store
+            .new_index_file(RTREE_PAGES_NAME, RTREE_PAGE_SCHEMA.clone())
+            .await?;
+
+        let mut current_level = Some(sorted_data);
+        while let Some(mut data) = current_level.take() {
+            let mut next_level = vec![];
+            while let Some(batch) = data.next().await {
+                let batch = batch?;
+                let encoded_batch = train_rtree_page(batch, batch_idx, writer.as_mut()).await?;
+                batch_idx += 1;
+                next_level.push(encoded_batch);
+            }
+
+            if !next_level.is_empty() {
+                current_level = Some(EncodedBatch::batches_into_batch_stream(
+                    next_level, page_size,
+                ));
+            }
+        }
+        Ok(())
     }
 }
 
 #[derive(Debug, Default)]
 pub struct RTreeIndexPlugin;
 
-impl RTreeIndexPlugin {
-    pub async fn train_rtree_index(
-        batches_source: SendableRecordBatchStream,
-        index_store: &dyn IndexStore,
-    ) -> Result<()> {
-
-        let mut builder = RTreeIndexBuilder::try_new(RTreeIndexBuilderOptions::default())?;
-
-        builder.train(batches_source).await?;
-
-        builder.write_index(index_store, None).await
-    }
-}
-
 #[async_trait]
 impl ScalarIndexPlugin for RTreeIndexPlugin {
     fn new_training_request(
         &self,
-        params: &str,
-        field: &Field,
+        _params: &str,
+        field: &ArrowField,
     ) -> Result<Box<dyn TrainingRequest>> {
         // Check if field has geoarrow extension type
         RTreeIndexBuilder::validate_value_field(field)?;
@@ -434,7 +464,9 @@ impl ScalarIndexPlugin for RTreeIndexPlugin {
         index_store: &dyn IndexStore,
         _request: Box<dyn TrainingRequest>,
     ) -> Result<CreatedIndex> {
-        Self::train_rtree_index(data, index_store).await?;
+        let mut builder = RTreeIndexBuilder::try_new(RTreeIndexBuilderOptions::default())?;
+        builder.train(data, index_store).await?;
+
         Ok(CreatedIndex {
             index_details: prost_types::Any::from_msg(&pb::RTreeIndexDetails::default())?,
             index_version: RTREE_INDEX_VERSION,
@@ -442,11 +474,11 @@ impl ScalarIndexPlugin for RTreeIndexPlugin {
     }
 
     fn provides_exact_answer(&self) -> bool {
-        todo!()
+        true
     }
 
     fn version(&self) -> u32 {
-        0
+        RTREE_INDEX_VERSION
     }
 
     fn new_query_parser(
@@ -473,12 +505,69 @@ struct EncodedBatch {
     page_number: u32,
 }
 
+impl EncodedBatch {
+    fn batches_into_batch_stream(
+        batches: Vec<EncodedBatch>,
+        batch_size: u32,
+    ) -> SendableRecordBatchStream {
+        let batches = batches
+            .chunks(batch_size as usize)
+            .map(|chunk| {
+                let mut min_x = Vec::with_capacity(chunk.len());
+                let mut min_y = Vec::with_capacity(chunk.len());
+                let mut max_x = Vec::with_capacity(chunk.len());
+                let mut max_y = Vec::with_capacity(chunk.len());
+                let mut page_numbers = Vec::with_capacity(chunk.len());
+
+                for item in chunk {
+                    min_x.push(item.bbox.min_x);
+                    min_y.push(item.bbox.min_y);
+                    max_x.push(item.bbox.max_x);
+                    max_y.push(item.bbox.max_y);
+                    page_numbers.push(item.page_number);
+                }
+
+                RecordBatch::try_new(
+                    RTREE_PAGE_SCHEMA.clone(),
+                    vec![
+                        Arc::new(Float64Array::from(min_x)),
+                        Arc::new(Float64Array::from(min_y)),
+                        Arc::new(Float64Array::from(max_x)),
+                        Arc::new(Float64Array::from(max_y)),
+                        Arc::new(new_null_array(&DataType::UInt64, chunk.len())),
+                        Arc::new(UInt32Array::from(page_numbers)),
+                    ],
+                )
+                .unwrap()
+            })
+            .collect::<Vec<_>>();
+
+        Box::pin(RecordBatchStreamAdapter::new(
+            RTREE_PAGE_SCHEMA.clone(),
+            stream::iter(batches).map(Ok).boxed(),
+        ))
+    }
+}
+
 async fn train_rtree_page(
     batch: RecordBatch,
     batch_idx: u32,
     writer: &mut dyn IndexWriter,
 ) -> Result<EncodedBatch> {
-    let bbox = analyze_batch(&batch)?;
+    // Leaf pages lack pageid, branch pages lacks rowid, fill the missing column with null.
+    let columns = RTREE_PAGE_SCHEMA
+        .fields()
+        .iter()
+        .map(|f| {
+            batch
+                .column_by_name(f.name())
+                .map(|arr| arr.clone())
+                .unwrap_or_else(|| Arc::new(new_null_array(f.data_type(), batch.num_rows())))
+        })
+        .collect::<Vec<_>>();
+    let new_batch = RecordBatch::try_new(RTREE_PAGE_SCHEMA.clone(), columns)?;
+
+    let bbox = analyze_batch(&new_batch)?;
     writer.write_record_batch(batch).await?;
     Ok(EncodedBatch {
         bbox,
