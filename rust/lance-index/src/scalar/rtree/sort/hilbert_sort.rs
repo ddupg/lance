@@ -25,7 +25,7 @@ use lance_datafusion::exec::{execute_plan, LanceExecutionOptions, OneShotExec};
 use num_traits::Bounded;
 use snafu::location;
 use std::any::Any;
-use std::sync::{Arc, LazyLock};
+use std::sync::Arc;
 use async_trait::async_trait;
 use crate::scalar::rtree::sort::Sorter;
 
@@ -72,7 +72,7 @@ impl Sorter for HilbertSorter {
     async fn sort(
         &self,
         mut data: SendableRecordBatchStream,
-    ) -> Result<SendableRecordBatchStream> {
+    ) -> Result<(SendableRecordBatchStream, usize)> {
         // 1. Scan source data statistics bbox, and spill data to disk
         let mut writer = self
             .spill_store
@@ -85,6 +85,7 @@ impl Sorter for HilbertSorter {
             f64::min_value(),
             f64::min_value(),
         );
+        let mut num_rows = 0;
         while let Some(batch) = data.next().await {
             let batch = batch?;
             let (min_x, min_y, max_x, max_y) = Self::extract_coord_array(&batch)?;
@@ -96,6 +97,7 @@ impl Sorter for HilbertSorter {
                     max_y.value(i),
                 );
             }
+            num_rows += batch.num_rows();
             writer.write_record_batch(batch).await?;
         }
         writer.finish().await?;
@@ -163,7 +165,7 @@ impl Sorter for HilbertSorter {
             .delete_index_file(self.tmp_spill_filename())
             .await?;
 
-        Ok(sorted_stream)
+        Ok((sorted_stream, num_rows))
     }
 
     async fn cleanup(&self) -> Result<()> {

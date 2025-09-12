@@ -1,46 +1,53 @@
 // SPDX-FileCopyrightText: Copyright The Lance Authors
 
-use std::any::Any;
-use std::collections::HashMap;
 use crate::frag_reuse::FragReuseIndex;
-use crate::{pb, Index, IndexType};
+use crate::metrics::MetricsCollector;
 use crate::scalar::expression::ScalarQueryParser;
 use crate::scalar::lance_format::LanceIndexStore;
 use crate::scalar::registry::{
     DefaultTrainingRequest, ScalarIndexPlugin, TrainingCriteria, TrainingOrdering, TrainingRequest,
     VALUE_COLUMN_NAME,
 };
+use crate::scalar::rtree::page::PageType;
 use crate::scalar::rtree::sort::Sorter;
-use crate::scalar::{AnyQuery, CreatedIndex, IndexStore, IndexWriter, ScalarIndex, SearchResult, UpdateCriteria};
+use crate::scalar::{
+    AnyQuery, CreatedIndex, IndexReaderStream, IndexStore, IndexWriter, ScalarIndex, SearchResult,
+    UpdateCriteria,
+};
+use crate::vector::VectorIndex;
+use crate::{pb, Index, IndexType};
+use arrow_array::cast::AsArray;
+use arrow_array::types::UInt64Type;
 use arrow_array::{new_null_array, Array, Float64Array, RecordBatch, UInt32Array};
 use arrow_schema::{DataType, Field as ArrowField, Schema as ArrowSchema};
 use async_trait::async_trait;
 use datafusion::execution::SendableRecordBatchStream;
 use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
 use datafusion_common::DataFusionError;
+use deepsize::DeepSizeOf;
 use futures::{stream, StreamExt, TryStreamExt};
 use lance_core::cache::LanceCache;
+use lance_core::utils::address::RowAddress;
 use lance_core::{Error, Result, ROW_ID};
 use lance_io::object_store::ObjectStore;
 use num_traits::Bounded;
 use object_store::path::Path;
+use roaring::RoaringBitmap;
+use serde::Serialize;
+use serde_json::Value;
 use snafu::location;
 use sort::hilbert_sort::HilbertSorter;
+use std::any::Any;
+use std::collections::HashMap;
 use std::sync::{Arc, LazyLock};
-use deepsize::DeepSizeOf;
-use roaring::RoaringBitmap;
-use serde_json::Value;
 use tempfile::{tempdir, TempDir};
-use crate::metrics::MetricsCollector;
-use crate::scalar::btree::BTreeIndex;
-use crate::scalar::ngram::NGramIndex;
-use crate::vector::VectorIndex;
 
+mod page;
 mod sort;
 
 const DEFAULT_RTREE_PAGE_SIZE: u32 = 4096;
-const RTREE_PAGES_NAME: &str = "page_data.lance";
 const RTREE_INDEX_VERSION: u32 = 0;
+const RTREE_PAGES_NAME: &str = "page_data.lance";
 
 static BBOX_SCHEMA: LazyLock<Arc<ArrowSchema>> = LazyLock::new(|| {
     Arc::new(ArrowSchema::new(vec![
@@ -70,26 +77,30 @@ static RTREE_PAGE_SCHEMA: LazyLock<Arc<ArrowSchema>> = LazyLock::new(|| {
     Arc::new(ArrowSchema::new(fields))
 });
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Serialize)]
 pub struct RTreeMetadata {
     pub(crate) page_size: u32,
     pub(crate) num_pages: u32,
+    pub(crate) num_rows: usize,
+    // TODO
+    pub(crate) bbox: Option<BoundingBox>,
 }
 
 impl RTreeMetadata {
-    pub fn new(page_size: u32, num_pages: u32) -> Self {
+    pub fn new(page_size: u32, num_pages: u32, num_rows: usize) -> Self {
         Self {
             page_size,
             num_pages,
+            num_rows,
+            bbox: None,
         }
     }
-}
 
-impl From<RTreeMetadata> for HashMap<String, String> {
-    fn from(metadata: RTreeMetadata) -> Self {
+    fn into_map(&self) -> HashMap<String, String> {
         HashMap::from_iter(vec![
-            ("page_size".to_owned(), metadata.page_size.to_string()),
-            ("num_pages".to_owned(), metadata.num_pages.to_string())
+            ("page_size".to_owned(), self.page_size.to_string()),
+            ("num_pages".to_owned(), self.num_pages.to_string()),
+            ("num_rows".to_owned(), self.num_rows.to_string()),
         ])
     }
 }
@@ -104,11 +115,15 @@ impl From<&HashMap<String, String>> for RTreeMetadata {
             .get("num_pages")
             .map(|bs| bs.parse().unwrap_or(0))
             .unwrap_or(0);
-        Self::new(page_size, num_pages)
+        let num_rows = metadata
+            .get("num_pages")
+            .map(|bs| bs.parse().unwrap_or(0))
+            .unwrap_or(0);
+        Self::new(page_size, num_pages, num_rows)
     }
 }
 
-#[derive(Debug, PartialEq, Clone)]
+#[derive(Debug, PartialEq, Clone, Serialize)]
 pub struct BoundingBox {
     min_x: f64,
     min_y: f64,
@@ -134,7 +149,7 @@ impl BoundingBox {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub struct RTree {
     pub(crate) metadata: RTreeMetadata,
 }
@@ -367,9 +382,9 @@ impl RTreeIndexBuilder {
         let bbox_data = convert_bbox_stream(data)?;
         // new sorted stream
         let sorter = HilbertSorter::new(DEFAULT_RTREE_PAGE_SIZE, self.spill_store.clone());
-        let sorted_data = sorter.sort(bbox_data).await?;
+        let (sorted_data, num_rows) = sorter.sort(bbox_data).await?;
 
-        self.write_index(sorted_data, store, DEFAULT_RTREE_PAGE_SIZE)
+        self.write_index(sorted_data, num_rows, store, DEFAULT_RTREE_PAGE_SIZE)
             .await?;
         sorter.cleanup().await?;
 
@@ -378,7 +393,8 @@ impl RTreeIndexBuilder {
 
     pub async fn write_index(
         &mut self,
-        sorted_data: SendableRecordBatchStream,
+        mut sorted_data: SendableRecordBatchStream,
+        num_rows: usize,
         store: &dyn IndexStore,
         page_size: u32,
     ) -> Result<()> {
@@ -387,30 +403,47 @@ impl RTreeIndexBuilder {
             .new_index_file(RTREE_PAGES_NAME, RTREE_PAGE_SCHEMA.clone())
             .await?;
 
-        let mut current_level = Some(sorted_data);
-        while let Some(mut data) = current_level.take() {
-            let mut next_level = vec![];
-            while let Some(batch) = data.next().await {
+        if num_rows == 0 {
+        } else if num_rows <= page_size as usize {
+            while let Some(batch) = sorted_data.next().await {
                 let batch = batch?;
-                let encoded_batch = train_rtree_page(batch, page_idx, writer.as_mut()).await?;
+                train_rtree_page(batch, PageType::Leaf, page_idx, writer.as_mut()).await?;
                 page_idx += 1;
-                next_level.push(encoded_batch);
             }
+            assert_eq!(page_idx, 1)
+        } else {
+            let mut current_level = Some((sorted_data, PageType::Leaf));
+            while let Some((mut data, page_type)) = current_level.take() {
+                let mut next_level = vec![];
+                while let Some(batch) = data.next().await {
+                    let batch = batch?;
+                    let encoded_batch =
+                        train_rtree_page(batch, page_type, page_idx, writer.as_mut()).await?;
+                    page_idx += 1;
+                    next_level.push(encoded_batch);
+                }
 
-            if !next_level.is_empty() {
-                current_level = Some(encoded_batches_into_batch_stream(next_level, page_size));
+                if !next_level.is_empty() {
+                    current_level = Some((
+                        encoded_batches_into_batch_stream(next_level, page_size),
+                        PageType::Branch,
+                    ));
+                }
             }
         }
-        writer.finish_with_metadata(RTreeMetadata::new(page_size, page_idx).into()).await?;
+
+        writer
+            .finish_with_metadata(RTreeMetadata::new(page_size, page_idx, num_rows).into_map())
+            .await?;
 
         Ok(())
     }
 }
 
-
 #[derive(Clone, Debug)]
 pub struct RTreeIndex {
-
+    pub(crate) metadata: Arc<RTreeMetadata>,
+    store: Arc<dyn IndexStore>,
 }
 
 impl RTreeIndex {
@@ -447,11 +480,15 @@ impl Index for RTreeIndex {
     }
 
     fn statistics(&self) -> Result<Value> {
-        todo!()
+        serde_json::to_value(self.metadata.clone()).map_err(|e| Error::Internal {
+            message: format!("Error serializing statistics: {}", e),
+            location: location!(),
+        })
     }
 
     async fn prewarm(&self) -> Result<()> {
-        todo!()
+        // TODO: may pre-warm by loading high level branch page into memory
+        Ok(())
     }
 
     fn index_type(&self) -> IndexType {
@@ -459,30 +496,73 @@ impl Index for RTreeIndex {
     }
 
     async fn calculate_included_frags(&self) -> Result<RoaringBitmap> {
-        todo!()
+        let mut frag_ids = RoaringBitmap::default();
+
+        let sub_index_reader = self.store.open_index_file(RTREE_PAGES_NAME).await?;
+        let mut reader_stream =
+            IndexReaderStream::new(sub_index_reader, self.metadata.page_size as u64)
+                .await
+                .buffered(self.store.io_parallelism());
+        let mut read_rows = 0;
+        while let Some(page) = reader_stream.try_next().await? {
+            let mut page_frag_ids = page
+                .column_by_name(ROW_ID)
+                .ok_or_else(|| Error::Index {
+                    message: format!("RTree page lacks {} column", ROW_ID).to_owned(),
+                    location: location!(),
+                })?
+                .as_primitive::<UInt64Type>()
+                .iter()
+                .flatten()
+                .map(|row_id| RowAddress::from(row_id).fragment_id())
+                .collect::<Vec<_>>();
+            page_frag_ids.sort();
+            page_frag_ids.dedup();
+            frag_ids |= RoaringBitmap::from_sorted_iter(page_frag_ids).unwrap();
+
+            read_rows += page.num_rows();
+            if read_rows >= self.metadata.num_rows {
+                break;
+            }
+        }
+        Ok(frag_ids)
     }
 }
 
 #[async_trait]
 impl ScalarIndex for RTreeIndex {
-    async fn search(&self, query: &dyn AnyQuery, metrics: &dyn MetricsCollector) -> Result<SearchResult> {
+    async fn search(
+        &self,
+        query: &dyn AnyQuery,
+        metrics: &dyn MetricsCollector,
+    ) -> Result<SearchResult> {
         todo!()
     }
 
     fn can_remap(&self) -> bool {
+        false
+    }
+
+    async fn remap(
+        &self,
+        _mapping: &HashMap<u64, Option<u64>>,
+        _dest_store: &dyn IndexStore,
+    ) -> Result<CreatedIndex> {
+        // TODO: Remapping may delete data, which could the bounding boxes changed, so need retrain
+        // the entire RTree.
         todo!()
     }
 
-    async fn remap(&self, mapping: &HashMap<u64, Option<u64>>, dest_store: &dyn IndexStore) -> Result<CreatedIndex> {
-        todo!()
-    }
-
-    async fn update(&self, new_data: SendableRecordBatchStream, dest_store: &dyn IndexStore) -> Result<CreatedIndex> {
+    async fn update(
+        &self,
+        new_data: SendableRecordBatchStream,
+        dest_store: &dyn IndexStore,
+    ) -> Result<CreatedIndex> {
         todo!()
     }
 
     fn update_criteria(&self) -> UpdateCriteria {
-        todo!()
+        UpdateCriteria::only_new_data(TrainingCriteria::new(TrainingOrdering::None).with_row_id())
     }
 }
 
@@ -595,24 +675,32 @@ fn encoded_batches_into_batch_stream(
 
 async fn train_rtree_page(
     batch: RecordBatch,
+    page_type: PageType,
     batch_idx: u32,
     writer: &mut dyn IndexWriter,
 ) -> Result<EncodedBatch> {
-    // Leaf pages lack pageid, branch pages lacks rowid, fill the missing column with null.
-    let columns = RTREE_PAGE_SCHEMA
-        .fields()
-        .iter()
-        .map(|f| {
-            batch
-                .column_by_name(f.name())
-                .map(|arr| arr.clone())
-                .unwrap_or_else(|| Arc::new(new_null_array(f.data_type(), batch.num_rows())))
-        })
-        .collect::<Vec<_>>();
-    let new_batch = RecordBatch::try_new(RTREE_PAGE_SCHEMA.clone(), columns)?;
+    let new_batch = match page_type {
+        // Leaf pages lack pageid, fill the missing column with null.
+        PageType::Leaf => {
+            let columns = RTREE_PAGE_SCHEMA
+                .fields()
+                .iter()
+                .map(|f| {
+                    batch
+                        .column_by_name(f.name())
+                        .map(|arr| arr.clone())
+                        .unwrap_or_else(|| {
+                            Arc::new(new_null_array(f.data_type(), batch.num_rows()))
+                        })
+                })
+                .collect::<Vec<_>>();
+            RecordBatch::try_new(RTREE_PAGE_SCHEMA.clone(), columns)?
+        }
+        PageType::Branch => batch,
+    };
 
     let bbox = analyze_batch(&new_batch)?;
-    writer.write_record_batch(batch).await?;
+    writer.write_record_batch(new_batch).await?;
     Ok(EncodedBatch {
         bbox,
         page_number: batch_idx,

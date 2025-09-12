@@ -12,7 +12,7 @@ pub trait Sorter {
     async fn sort(
         &self,
         data: SendableRecordBatchStream,
-    ) -> Result<SendableRecordBatchStream>;
+    ) -> Result<(SendableRecordBatchStream, usize)>;
 
     async fn cleanup(&self) -> Result<()>;
 }
