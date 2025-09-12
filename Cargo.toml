@@ -123,7 +123,7 @@ fsst = { version = "=0.35.0", path = "./rust/compression/fsst" }
 futures = "0.3"
 geoarrow-array = "0.5.0"
 geoarrow-schema = "0.5.0"
-geodatafusion = { git = "https://github.com/datafusion-contrib/datafusion-geo", branch = "main" }
+geodatafusion = { git = "https://github.com/geoarrow/geoarrow-rs", rev = "6bb9b0e419e67ece4c742fbb070a99d10dbd8f38" }
 geo-types = "0.7.16"
 http = "1.1.0"
 humantime = "2.2.0"

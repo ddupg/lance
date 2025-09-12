@@ -3086,13 +3086,13 @@ dependencies = [
 [[package]]
 name = "geoarrow-array"
 version = "0.5.0"
-source = "git+https://github.com/geoarrow/geoarrow-rs?rev=61a535b072766003ad06a4d7a25dcc15f010e68f#61a535b072766003ad06a4d7a25dcc15f010e68f"
+source = "git+https://github.com/geoarrow/geoarrow-rs?rev=6bb9b0e419e67ece4c742fbb070a99d10dbd8f38#6bb9b0e419e67ece4c742fbb070a99d10dbd8f38"
 dependencies = [
  "arrow-array",
  "arrow-buffer",
  "arrow-schema",
  "geo-traits",
- "geoarrow-schema 0.5.0 (git+https://github.com/geoarrow/geoarrow-rs?rev=61a535b072766003ad06a4d7a25dcc15f010e68f)",
+ "geoarrow-schema 0.5.0 (git+https://github.com/geoarrow/geoarrow-rs?rev=6bb9b0e419e67ece4c742fbb070a99d10dbd8f38)",
  "num-traits",
  "wkb",
  "wkt",
@@ -3101,14 +3101,14 @@ dependencies = [
 [[package]]
 name = "geoarrow-geo"
 version = "0.5.0"
-source = "git+https://github.com/geoarrow/geoarrow-rs?rev=61a535b072766003ad06a4d7a25dcc15f010e68f#61a535b072766003ad06a4d7a25dcc15f010e68f"
+source = "git+https://github.com/geoarrow/geoarrow-rs?rev=6bb9b0e419e67ece4c742fbb070a99d10dbd8f38#6bb9b0e419e67ece4c742fbb070a99d10dbd8f38"
 dependencies = [
  "arrow-array",
  "arrow-buffer",
  "geo",
  "geo-traits",
- "geoarrow-array 0.5.0 (git+https://github.com/geoarrow/geoarrow-rs?rev=61a535b072766003ad06a4d7a25dcc15f010e68f)",
- "geoarrow-schema 0.5.0 (git+https://github.com/geoarrow/geoarrow-rs?rev=61a535b072766003ad06a4d7a25dcc15f010e68f)",
+ "geoarrow-array 0.5.0 (git+https://github.com/geoarrow/geoarrow-rs?rev=6bb9b0e419e67ece4c742fbb070a99d10dbd8f38)",
+ "geoarrow-schema 0.5.0 (git+https://github.com/geoarrow/geoarrow-rs?rev=6bb9b0e419e67ece4c742fbb070a99d10dbd8f38)",
 ]
 
 [[package]]
@@ -3127,7 +3127,7 @@ dependencies = [
 [[package]]
 name = "geoarrow-schema"
 version = "0.5.0"
-source = "git+https://github.com/geoarrow/geoarrow-rs?rev=61a535b072766003ad06a4d7a25dcc15f010e68f#61a535b072766003ad06a4d7a25dcc15f010e68f"
+source = "git+https://github.com/geoarrow/geoarrow-rs?rev=6bb9b0e419e67ece4c742fbb070a99d10dbd8f38#6bb9b0e419e67ece4c742fbb070a99d10dbd8f38"
 dependencies = [
  "arrow-schema",
  "geo-traits",
@@ -3139,7 +3139,7 @@ dependencies = [
 [[package]]
 name = "geodatafusion"
 version = "0.1.0-dev"
-source = "git+https://github.com/datafusion-contrib/datafusion-geo?branch=main#88c55459db62e76261dbdce104c0431896788de5"
+source = "git+https://github.com/geoarrow/geoarrow-rs?rev=6bb9b0e419e67ece4c742fbb070a99d10dbd8f38#6bb9b0e419e67ece4c742fbb070a99d10dbd8f38"
 dependencies = [
  "arrow-arith",
  "arrow-array",
@@ -3147,9 +3147,9 @@ dependencies = [
  "datafusion",
  "geo",
  "geo-traits",
- "geoarrow-array 0.5.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "geoarrow-array 0.5.0 (git+https://github.com/geoarrow/geoarrow-rs?rev=6bb9b0e419e67ece4c742fbb070a99d10dbd8f38)",
  "geoarrow-geo",
- "geoarrow-schema 0.5.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "geoarrow-schema 0.5.0 (git+https://github.com/geoarrow/geoarrow-rs?rev=6bb9b0e419e67ece4c742fbb070a99d10dbd8f38)",
  "geohash",
  "thiserror 1.0.69",
  "wkt",

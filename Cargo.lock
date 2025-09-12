@@ -963,9 +963,9 @@ dependencies = [
 
 [[package]]
 name = "aws-smithy-runtime"
-version = "1.9.2"
+version = "1.9.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4fa63ad37685ceb7762fa4d73d06f1d5493feb88e3f27259b9ed277f4c01b185"
+checksum = "d3946acbe1ead1301ba6862e712c7903ca9bb230bdf1fbd1b5ac54158ef2ab1f"
 dependencies = [
  "aws-smithy-async",
  "aws-smithy-http",
@@ -1571,9 +1571,9 @@ checksum = "b05b61dc5112cbb17e4b6cd61790d9845d13888356391624cbe7e41efeac1e75"
 
 [[package]]
 name = "comfy-table"
-version = "7.2.1"
+version = "7.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b03b7db8e0b4b2fdad6c551e634134e99ec000e5c8c3b6856c65e8bbaded7a3b"
+checksum = "3f8e18d0dca9578507f13f9803add0df13362b02c501c1c17734f0dbb52eaf0b"
 dependencies = [
  "unicode-segmentation",
  "unicode-width",
@@ -3467,13 +3467,13 @@ dependencies = [
 [[package]]
 name = "geoarrow-array"
 version = "0.5.0"
-source = "git+https://github.com/geoarrow/geoarrow-rs?rev=61a535b072766003ad06a4d7a25dcc15f010e68f#61a535b072766003ad06a4d7a25dcc15f010e68f"
+source = "git+https://github.com/geoarrow/geoarrow-rs?rev=6bb9b0e419e67ece4c742fbb070a99d10dbd8f38#6bb9b0e419e67ece4c742fbb070a99d10dbd8f38"
 dependencies = [
  "arrow-array",
  "arrow-buffer",
  "arrow-schema",
  "geo-traits",
- "geoarrow-schema 0.5.0 (git+https://github.com/geoarrow/geoarrow-rs?rev=61a535b072766003ad06a4d7a25dcc15f010e68f)",
+ "geoarrow-schema 0.5.0 (git+https://github.com/geoarrow/geoarrow-rs?rev=6bb9b0e419e67ece4c742fbb070a99d10dbd8f38)",
  "num-traits",
  "wkb",
  "wkt",
@@ -3482,14 +3482,14 @@ dependencies = [
 [[package]]
 name = "geoarrow-geo"
 version = "0.5.0"
-source = "git+https://github.com/geoarrow/geoarrow-rs?rev=61a535b072766003ad06a4d7a25dcc15f010e68f#61a535b072766003ad06a4d7a25dcc15f010e68f"
+source = "git+https://github.com/geoarrow/geoarrow-rs?rev=6bb9b0e419e67ece4c742fbb070a99d10dbd8f38#6bb9b0e419e67ece4c742fbb070a99d10dbd8f38"
 dependencies = [
  "arrow-array",
  "arrow-buffer",
  "geo",
  "geo-traits",
- "geoarrow-array 0.5.0 (git+https://github.com/geoarrow/geoarrow-rs?rev=61a535b072766003ad06a4d7a25dcc15f010e68f)",
- "geoarrow-schema 0.5.0 (git+https://github.com/geoarrow/geoarrow-rs?rev=61a535b072766003ad06a4d7a25dcc15f010e68f)",
+ "geoarrow-array 0.5.0 (git+https://github.com/geoarrow/geoarrow-rs?rev=6bb9b0e419e67ece4c742fbb070a99d10dbd8f38)",
+ "geoarrow-schema 0.5.0 (git+https://github.com/geoarrow/geoarrow-rs?rev=6bb9b0e419e67ece4c742fbb070a99d10dbd8f38)",
 ]
 
 [[package]]
@@ -3508,7 +3508,7 @@ dependencies = [
 [[package]]
 name = "geoarrow-schema"
 version = "0.5.0"
-source = "git+https://github.com/geoarrow/geoarrow-rs?rev=61a535b072766003ad06a4d7a25dcc15f010e68f#61a535b072766003ad06a4d7a25dcc15f010e68f"
+source = "git+https://github.com/geoarrow/geoarrow-rs?rev=6bb9b0e419e67ece4c742fbb070a99d10dbd8f38#6bb9b0e419e67ece4c742fbb070a99d10dbd8f38"
 dependencies = [
  "arrow-schema",
  "geo-traits",
@@ -3520,7 +3520,7 @@ dependencies = [
 [[package]]
 name = "geodatafusion"
 version = "0.1.0-dev"
-source = "git+https://github.com/datafusion-contrib/datafusion-geo?branch=main#88c55459db62e76261dbdce104c0431896788de5"
+source = "git+https://github.com/geoarrow/geoarrow-rs?rev=6bb9b0e419e67ece4c742fbb070a99d10dbd8f38#6bb9b0e419e67ece4c742fbb070a99d10dbd8f38"
 dependencies = [
  "arrow-arith",
  "arrow-array",
@@ -3528,9 +3528,9 @@ dependencies = [
  "datafusion",
  "geo",
  "geo-traits",
- "geoarrow-array 0.5.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "geoarrow-array 0.5.0 (git+https://github.com/geoarrow/geoarrow-rs?rev=6bb9b0e419e67ece4c742fbb070a99d10dbd8f38)",
  "geoarrow-geo",
- "geoarrow-schema 0.5.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "geoarrow-schema 0.5.0 (git+https://github.com/geoarrow/geoarrow-rs?rev=6bb9b0e419e67ece4c742fbb070a99d10dbd8f38)",
  "geohash",
  "thiserror 1.0.69",
  "wkt",
@@ -3853,9 +3853,9 @@ checksum = "df3b46402a9d5adb4c86a0cf463f42e19994e3ee891101b1841f30a545cb49a9"
 
 [[package]]
 name = "humantime"
-version = "2.3.0"
+version = "2.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "135b12329e5e3ce057a9f972339ea52bc954fe1e9358ef27f95e89716fbc5424"
+checksum = "9b112acc8b3adf4b107a8ec20977da0273a8c386765a3ec0229bd500a1443f9f"
 
 [[package]]
 name = "hyper"
@@ -3999,18 +3999,15 @@ dependencies = [
 
 [[package]]
 name = "i_key_sort"
-version = "0.7.0"
+version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6535bf18be1b4f87ac3d2556cf260137a3ee30d3a3c4ebce6123f8ca5d2e8718"
-dependencies = [
- "rayon",
-]
+checksum = "9190f86706ca38ac8add223b2aed8b1330002b5cdbbce28fb58b10914d38fc27"
 
 [[package]]
 name = "i_overlay"
-version = "4.0.3"
+version = "4.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "225ebac6ae3a4d5f6ef66dccdd24ed9468d3b636402bc014cd477b4017b128c7"
+checksum = "e9c291f5c15a84f0e9126ff050719c5ca50227b27947b52526ee8370287dfc9e"
 dependencies = [
  "i_float",
  "i_key_sort",
@@ -7429,7 +7426,7 @@ dependencies = [
  "once_cell",
  "ring",
  "rustls-pki-types",
- "rustls-webpki 0.103.5",
+ "rustls-webpki 0.103.4",
  "subtle",
  "zeroize",
 ]
@@ -7498,9 +7495,9 @@ dependencies = [
 
 [[package]]
 name = "rustls-webpki"
-version = "0.103.5"
+version = "0.103.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b5a37813727b78798e53c2bec3f5e8fe12a6d6f8389bf9ca7802add4c9905ad8"
+checksum = "0a17884ae0c1b773f1ccd2bd4a8c72f16da897310a98b0e84bf349ad5ead92fc"
 dependencies = [
  "aws-lc-rs",
  "ring",
