@@ -39,10 +39,7 @@ use lance_io::{
     ReadBatchParams,
 };
 use object_store::path::Path;
-use pyo3::{
-    exceptions::{PyIOError, PyRuntimeError, PyValueError},
-    pyclass, pyfunction, pymethods, IntoPyObjectExt, PyObject, PyResult, Python,
-};
+use pyo3::{exceptions::{PyIOError, PyRuntimeError, PyValueError}, pyclass, pyfunction, pymethods, IntoPyObjectExt, Py, PyAny, PyResult, Python};
 use regex::Regex;
 use serde::Serialize;
 use std::collections::HashMap;
@@ -177,7 +174,7 @@ impl LanceFileStatistics {
 pub struct LanceFileMetadata {
     /// The schema of the file
     #[serde(skip)]
-    pub schema: Option<PyObject>,
+    pub schema: Option<Py<PyAny>>,
     /// The major version of the file
     pub major_version: u16,
     /// The minor version of the file

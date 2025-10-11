@@ -86,7 +86,7 @@ impl ScanStatistics {
 #[pymethods]
 impl Scanner {
     #[getter(schema)]
-    fn schema(self_: PyRef<'_, Self>) -> PyResult<PyObject> {
+    fn schema(self_: PyRef<'_, Self>) -> PyResult<Py<PyAny>> {
         let scanner = self_.scanner.clone();
         rt().spawn(Some(self_.py()), async move { scanner.schema().await })?
             .map(|s| s.to_pyarrow(self_.py()))

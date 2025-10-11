@@ -28,7 +28,7 @@ use pyo3::{
     pybacked::PyBackedStr,
     pyclass,
     types::{IntoPyDict, PyDict},
-    PyObject, PyResult,
+    PyResult,
 };
 use pyo3::{prelude::*, IntoPyObjectExt};
 use snafu::location;
@@ -219,7 +219,7 @@ impl MergeInsertBuilder {
         Ok(slf)
     }
 
-    pub fn execute(&mut self, new_data: &Bound<PyAny>) -> PyResult<PyObject> {
+    pub fn execute(&mut self, new_data: &Bound<PyAny>) -> PyResult<Py<PyAny>> {
         let py = new_data.py();
         let new_data = convert_reader(new_data)?;
 
@@ -320,12 +320,12 @@ pub fn transforms_from_python(transforms: &Bound<'_, PyAny>) -> PyResult<NewColu
             transforms.getattr("output_schema")?.extract()?;
         let output_schema = Arc::new(append_schema.0);
 
-        let result_checkpoint: Option<PyObject> = transforms.getattr("cache")?.extract()?;
+        let result_checkpoint: Option<Py<PyAny>> = transforms.getattr("cache")?.extract()?;
         let result_checkpoint = result_checkpoint.map(|c| PyBatchUDFCheckpointWrapper { inner: c });
 
         let udf_obj = transforms.into_py_any(transforms.py())?;
         let mapper = move |batch: &RecordBatch| -> lance::Result<RecordBatch> {
-            Python::with_gil(|py| {
+            Python::attach(|py| {
                 let py_batch: PyArrowType<RecordBatch> = PyArrowType(batch.clone());
                 let result = udf_obj
                     .call_method1(py, "_call", (py_batch,))
@@ -453,11 +453,11 @@ impl Dataset {
     fn new(
         py: Python,
         uri: String,
-        version: Option<PyObject>,
+        version: Option<Py<PyAny>>,
         block_size: Option<usize>,
         index_cache_size: Option<usize>,
         metadata_cache_size: Option<usize>,
-        commit_handler: Option<PyObject>,
+        commit_handler: Option<Py<PyAny>>,
         storage_options: Option<HashMap<String, String>>,
         manifest: Option<&[u8]>,
         metadata_cache_size_bytes: Option<usize>,
@@ -571,7 +571,7 @@ impl Dataset {
     }
 
     #[getter(schema)]
-    fn schema(self_: PyRef<'_, Self>) -> PyResult<PyObject> {
+    fn schema(self_: PyRef<'_, Self>) -> PyResult<Py<PyAny>> {
         let arrow_schema = ArrowSchema::from(self_.ds.schema());
         arrow_schema.to_pyarrow(self_.py())
     }
@@ -636,7 +636,7 @@ impl Dataset {
             })
     }
 
-    fn serialized_manifest(&self, py: Python) -> PyObject {
+    fn serialized_manifest(&self, py: Python) -> Py<PyAny> {
         let manifest_bytes = self.ds.manifest().serialized();
         PyBytes::new(py, &manifest_bytes).into()
     }
@@ -644,7 +644,7 @@ impl Dataset {
     /// Get base paths from the manifest.
     ///
     /// Returns a dictionary mapping base_id to DatasetBasePath objects.
-    fn base_paths(&self, py: Python) -> PyResult<PyObject> {
+    fn base_paths(&self, py: Python) -> PyResult<Py<PyAny>> {
         let manifest = self.ds.manifest();
         let dict = pyo3::types::PyDict::new(py);
 
@@ -659,7 +659,7 @@ impl Dataset {
     /// Load index metadata.
     ///
     /// This call will open the index and return its concrete index type.
-    fn load_indices(self_: PyRef<'_, Self>) -> PyResult<Vec<PyObject>> {
+    fn load_indices(self_: PyRef<'_, Self>) -> PyResult<Vec<Py<PyAny>>> {
         let index_metadata = rt()
             .block_on(Some(self_.py()), self_.ds.load_indices())?
             .map_err(|err| PyValueError::new_err(err.to_string()))?;
@@ -747,7 +747,7 @@ impl Dataset {
         substrait_filter: Option<Vec<u8>>,
         fast_search: Option<bool>,
         full_text_query: Option<&Bound<'_, PyAny>>,
-        late_materialization: Option<PyObject>,
+        late_materialization: Option<Py<PyAny>>,
         use_scalar_index: Option<bool>,
         include_deleted_rows: Option<bool>,
         scan_stats_callback: Option<&Bound<'_, PyAny>>,
@@ -1096,7 +1096,7 @@ impl Dataset {
         row_indices: Vec<u64>,
         columns: Option<Vec<String>>,
         columns_with_transform: Option<Vec<(String, String)>>,
-    ) -> PyResult<PyObject> {
+    ) -> PyResult<Py<PyAny>> {
         let projection = match (columns, columns_with_transform) {
             (Some(_), Some(_)) => {
                 return Err(PyValueError::new_err(
@@ -1123,7 +1123,7 @@ impl Dataset {
         row_indices: Vec<u64>,
         columns: Option<Vec<String>>,
         columns_with_transform: Option<Vec<(String, String)>>,
-    ) -> PyResult<PyObject> {
+    ) -> PyResult<Py<PyAny>> {
         let projection = match (columns, columns_with_transform) {
             (Some(_), Some(_)) => {
                 return Err(PyValueError::new_err(
@@ -1179,7 +1179,7 @@ impl Dataset {
     #[pyo3(signature = (row_slices, columns = None, batch_readahead = 10))]
     fn take_scan(
         &self,
-        row_slices: PyObject,
+        row_slices: Py<PyAny>,
         columns: Option<Vec<String>>,
         batch_readahead: usize,
     ) -> PyResult<PyArrowType<Box<dyn RecordBatchReader + Send>>> {
@@ -1195,9 +1195,9 @@ impl Dataset {
         };
 
         // Call into the Python iterable, only holding the GIL as necessary.
-        let py_iter = Python::with_gil(|py| row_slices.call_method0(py, "__iter__"))?;
+        let py_iter = Python::attach(|py| row_slices.call_method0(py, "__iter__"))?;
         let slice_iter = std::iter::from_fn(move || {
-            Python::with_gil(|py| {
+            Python::attach(|py| {
                 match py_iter
                     .call_method0(py, "__next__")
                     .and_then(|range| range.extract::<(u64, u64)>(py))
@@ -1327,7 +1327,7 @@ impl Dataset {
         predicate: Option<&str>,
         conflict_retries: Option<u32>,
         retry_timeout: Option<std::time::Duration>,
-    ) -> PyResult<PyObject> {
+    ) -> PyResult<Py<PyAny>> {
         let mut builder = UpdateBuilder::new(self.ds.clone());
         if let Some(predicate) = predicate {
             builder = builder
@@ -1372,10 +1372,10 @@ impl Dataset {
             .map_err(|err| PyIOError::new_err(err.to_string()))
     }
 
-    fn versions(self_: PyRef<'_, Self>) -> PyResult<Vec<PyObject>> {
+    fn versions(self_: PyRef<'_, Self>) -> PyResult<Vec<Py<PyAny>>> {
         let versions = self_.list_versions()?;
-        Python::with_gil(|py| {
-            let pyvers: Vec<PyObject> = versions
+        Python::attach(|py| {
+            let pyvers: Vec<Py<PyAny>> = versions
                 .iter()
                 .map(|v| {
                     let dict = PyDict::new(py);
@@ -1404,7 +1404,7 @@ impl Dataset {
             .map_err(|err| PyIOError::new_err(err.to_string()))
     }
 
-    fn checkout_version(&self, py: Python, version: PyObject) -> PyResult<Self> {
+    fn checkout_version(&self, py: Python, version: Py<PyAny>) -> PyResult<Self> {
         if let Ok(i) = version.downcast_bound::<PyInt>(py) {
             let ref_: u64 = i.extract()?;
             self._checkout_version(ref_)
@@ -1452,10 +1452,10 @@ impl Dataset {
         })
     }
 
-    fn tags_ordered(self_: PyRef<'_, Self>, order: Option<String>) -> PyResult<PyObject> {
+    fn tags_ordered(self_: PyRef<'_, Self>, order: Option<String>) -> PyResult<Py<PyAny>> {
         let tags = self_.list_tags_ordered(order.as_deref())?;
 
-        Python::with_gil(|py| {
+        Python::attach(|py| {
             let pylist = PyList::empty(py);
 
             for (tag_name, tag_content) in tags {
@@ -1466,14 +1466,14 @@ impl Dataset {
                 pylist.append((tag_name.as_str(), dict))?;
             }
 
-            Ok(PyObject::from(pylist))
+            Ok(Py<PyAny>::from(pylist))
         })
     }
 
-    fn tags(self_: PyRef<'_, Self>) -> PyResult<PyObject> {
+    fn tags(self_: PyRef<'_, Self>) -> PyResult<Py<PyAny>> {
         let tags = self_.list_tags()?;
 
-        Python::with_gil(|py| {
+        Python::attach(|py| {
             let pytags = PyDict::new(py);
             for (k, v) in tags.iter() {
                 let dict = PyDict::new(py);
@@ -1820,7 +1820,7 @@ impl Dataset {
     fn get_fragments(self_: PyRef<'_, Self>) -> PyResult<Vec<FileFragment>> {
         let core_fragments = self_.ds.get_fragments();
 
-        Python::with_gil(|_| {
+        Python::attach(|_| {
             let fragments: Vec<FileFragment> = core_fragments
                 .iter()
                 .map(|f| FileFragment::new(f.clone()))
@@ -2154,14 +2154,14 @@ impl Dataset {
     // Unified metadata APIs
 
     #[pyo3(signature = ())]
-    fn get_table_metadata(&mut self) -> PyResult<PyObject> {
+    fn get_table_metadata(&mut self) -> PyResult<Py<PyAny>> {
         let new_self = self.ds.as_ref().clone();
 
         let table_metadata = new_self.metadata().clone();
 
         self.ds = Arc::new(new_self);
 
-        Python::with_gil(|py| {
+        Python::attach(|py| {
             let dict = PyDict::new(py);
             for (k, v) in table_metadata {
                 dict.set_item(k, v)?;
@@ -2403,7 +2403,7 @@ impl SqlQuery {
     ///
     /// This is an eager operation that will load all results into memory.
     /// This corresponds to `into_batch_records` in Rust.
-    fn to_batch_records(&self) -> PyResult<Vec<PyObject>> {
+    fn to_batch_records(&self) -> PyResult<Vec<Py<PyAny>>> {
         use arrow::pyarrow::ToPyArrow;
 
         let builder = self.builder.clone();
@@ -2415,18 +2415,18 @@ impl SqlQuery {
             .map_err(|e| PyValueError::new_err(e.to_string()))? // Handles tokio::JoinError
             .map_err(|e| PyValueError::new_err(e.to_string()))?; // Handles lance::Error
 
-        Python::with_gil(|py| {
+        Python::attach(|py| {
             batches
                 .iter()
                 .map(|rb| rb.to_pyarrow(py))
-                .collect::<PyResult<Vec<PyObject>>>()
+                .collect::<PyResult<Vec<Py<PyAny>>>>()
         })
     }
 
     /// Execute the query and return a RecordBatchReader.
     ///
     /// This is a lazy operation that will stream results.
-    fn to_stream_reader(&self) -> PyResult<PyObject> {
+    fn to_stream_reader(&self) -> PyResult<Py<PyAny>> {
         use crate::reader::LanceReader;
         use arrow::pyarrow::IntoPyArrow;
         use arrow_array::RecordBatchReader;
@@ -2449,7 +2449,7 @@ impl SqlQuery {
         let dataset_stream = DatasetRecordBatchStream::new(stream);
         let reader: Box<dyn RecordBatchReader + Send> =
             Box::new(LanceReader::from_stream(dataset_stream));
-        Python::with_gil(|py| reader.into_pyarrow(py))
+        Python::attach(|py| reader.into_pyarrow(py))
     }
 }
 
@@ -2554,7 +2554,7 @@ impl Dataset {
         let callback = callback.unbind();
 
         Ok(Arc::new(move |stats| {
-            Python::with_gil(|py| {
+            Python::attach(|py| {
                 let stats = ScanStatistics::from_lance(stats);
                 match callback.call1(py, (stats,)) {
                     Ok(_) => (),
@@ -2664,7 +2664,7 @@ pub fn get_write_params(options: &Bound<'_, PyDict>) -> PyResult<Option<WritePar
         {
             p.data_storage_version = Some(data_storage_version.parse().infer_error()?);
         }
-        if let Some(progress) = get_dict_opt::<PyObject>(options, "progress")? {
+        if let Some(progress) = get_dict_opt::<Py<PyAny>>(options, "progress")? {
             p.progress = Arc::new(PyWriteProgress::new(progress.into_py_any(options.py())?));
         }
 
@@ -2950,11 +2950,11 @@ fn prepare_vector_index_params(
 #[derive(Debug)]
 pub struct PyWriteProgress {
     /// A Python object that implements the `WriteFragmentProgress` trait.
-    py_obj: PyObject,
+    py_obj: Py<PyAny>,
 }
 
 impl PyWriteProgress {
-    fn new(obj: PyObject) -> Self {
+    fn new(obj: Py<PyAny>) -> Self {
         Self { py_obj: obj }
     }
 }
@@ -2964,7 +2964,7 @@ impl WriteFragmentProgress for PyWriteProgress {
     async fn begin(&self, fragment: &Fragment) -> lance::Result<()> {
         let json_str = serde_json::to_string(fragment)?;
 
-        Python::with_gil(|py| -> PyResult<()> {
+        Python::attach(|py| -> PyResult<()> {
             self.py_obj
                 .call_method(py, "_do_begin", (json_str,), None)?;
             Ok(())
@@ -2981,7 +2981,7 @@ impl WriteFragmentProgress for PyWriteProgress {
     async fn complete(&self, fragment: &Fragment) -> lance::Result<()> {
         let json_str = serde_json::to_string(fragment)?;
 
-        Python::with_gil(|py| -> PyResult<()> {
+        Python::attach(|py| -> PyResult<()> {
             self.py_obj
                 .call_method(py, "_do_complete", (json_str,), None)?;
             Ok(())
@@ -3011,11 +3011,11 @@ fn format_python_error(e: PyErr, py: Python) -> PyResult<String> {
 }
 
 struct PyBatchUDFCheckpointWrapper {
-    inner: PyObject,
+    inner: Py<PyAny>,
 }
 
 impl PyBatchUDFCheckpointWrapper {
-    fn batch_info_to_py(&self, info: &BatchInfo, py: Python) -> PyResult<PyObject> {
+    fn batch_info_to_py(&self, info: &BatchInfo, py: Python) -> PyResult<Py<PyAny>> {
         self.inner
             .getattr(py, "BatchInfo")?
             .call1(py, (info.fragment_id, info.batch_index))
@@ -3024,7 +3024,7 @@ impl PyBatchUDFCheckpointWrapper {
 
 impl UDFCheckpointStore for PyBatchUDFCheckpointWrapper {
     fn get_batch(&self, info: &BatchInfo) -> lance::Result<Option<RecordBatch>> {
-        Python::with_gil(|py| {
+        Python::attach(|py| {
             let info = self.batch_info_to_py(info, py)?;
             let batch = self.inner.call_method1(py, "get_batch", (info,))?;
             let batch: Option<PyArrowType<RecordBatch>> = batch.extract(py)?;
@@ -3039,7 +3039,7 @@ impl UDFCheckpointStore for PyBatchUDFCheckpointWrapper {
     }
 
     fn get_fragment(&self, fragment_id: u32) -> lance::Result<Option<Fragment>> {
-        let fragment_data = Python::with_gil(|py| {
+        let fragment_data = Python::attach(|py| {
             let fragment = self
                 .inner
                 .call_method1(py, "get_fragment", (fragment_id,))?;
@@ -3065,7 +3065,7 @@ impl UDFCheckpointStore for PyBatchUDFCheckpointWrapper {
     }
 
     fn insert_batch(&self, info: BatchInfo, batch: RecordBatch) -> lance::Result<()> {
-        Python::with_gil(|py| {
+        Python::attach(|py| {
             let info = self.batch_info_to_py(&info, py)?;
             let batch = PyArrowType(batch);
             self.inner.call_method1(py, "insert_batch", (info, batch))?;
@@ -3086,7 +3086,7 @@ impl UDFCheckpointStore for PyBatchUDFCheckpointWrapper {
                 location!(),
             )
         })?;
-        Python::with_gil(|py| {
+        Python::attach(|py| {
             self.inner
                 .call_method1(py, "insert_fragment", (fragment.id, data))?;
             Ok(())

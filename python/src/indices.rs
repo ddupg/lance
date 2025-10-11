@@ -19,7 +19,7 @@ use pyo3::Bound;
 use pyo3::{
     pyfunction,
     types::{PyList, PyModule},
-    wrap_pyfunction, PyObject, PyResult, Python,
+    wrap_pyfunction, PyResult, Python,
 };
 
 use lance::index::DatasetIndexInternalExt;
@@ -59,7 +59,7 @@ pub struct PyIvfModel {
 #[pymethods]
 impl PyIvfModel {
     #[getter]
-    fn centroids(&self, py: Python) -> PyResult<Option<PyObject>> {
+    fn centroids(&self, py: Python) -> PyResult<Option<Py<PyAny>>> {
         if let Some(centroids) = &self.inner.centroids {
             let data = centroids.clone().into_data();
             Ok(Some(data.to_pyarrow(py)?))
@@ -154,7 +154,7 @@ fn train_ivf_model(
     distance_type: &str,
     sample_rate: u32,
     max_iters: u32,
-) -> PyResult<PyObject> {
+) -> PyResult<Py<PyAny>> {
     let centroids = rt().block_on(
         Some(py),
         do_train_ivf_model(
@@ -215,7 +215,7 @@ fn train_pq_model(
     sample_rate: u32,
     max_iters: u32,
     ivf_centroids: PyArrowType<ArrayData>,
-) -> PyResult<PyObject> {
+) -> PyResult<Py<PyAny>> {
     let ivf_centroids = ivf_centroids.0;
     let ivf_centroids = FixedSizeListArray::from(ivf_centroids);
     let ivf_model = IvfModel {
@@ -358,7 +358,7 @@ pub fn shuffle_transformed_vectors(
     dir_path: &str,
     ivf_centroids: PyArrowType<ArrayData>,
     shuffle_output_root_filename: &str,
-) -> PyResult<PyObject> {
+) -> PyResult<Py<PyAny>> {
     let ivf_centroids = ivf_centroids.0;
     let ivf_centroids = FixedSizeListArray::from(ivf_centroids);
 

@@ -111,7 +111,7 @@ impl FileFragment {
 
         let batches = convert_reader(reader)?;
 
-        reader.py().allow_threads(|| {
+        reader.py().detach(|| {
             rt().runtime.block_on(async move {
                 let metadata =
                     LanceFragment::create(dataset_uri, fragment_id.unwrap_or(0), batches, params)
@@ -174,7 +174,7 @@ impl FileFragment {
         self_: PyRef<'_, Self>,
         row_indices: Vec<usize>,
         columns: Option<Vec<String>>,
-    ) -> PyResult<PyObject> {
+    ) -> PyResult<Py<PyAny>> {
         let dataset_schema = self_.fragment.dataset().schema();
         let projection = if let Some(columns) = columns {
             dataset_schema
@@ -334,7 +334,7 @@ impl FileFragment {
         }
     }
 
-    fn schema(self_: PyRef<'_, Self>) -> PyResult<PyObject> {
+    fn schema(self_: PyRef<'_, Self>) -> PyResult<Py<PyAny>> {
         let schema = self_.fragment.dataset().schema();
         let arrow_schema: ArrowSchema = schema.into();
         arrow_schema.to_pyarrow(self_.py())
@@ -404,7 +404,7 @@ pub fn write_fragments(
     dest: PyWriteDest,
     reader: &Bound<PyAny>,
     kwargs: Option<&Bound<'_, PyDict>>,
-) -> PyResult<Vec<PyObject>> {
+) -> PyResult<Vec<Py<PyAny>>> {
     let written = do_write_fragments(dest, reader, kwargs)?;
 
     assert!(
@@ -569,7 +569,7 @@ impl PyDeletionFile {
         Ok(Self(deletion_file))
     }
 
-    fn __reduce__(&self, py: Python<'_>) -> PyResult<(PyObject, PyObject)> {
+    fn __reduce__(&self, py: Python<'_>) -> PyResult<(Py<PyAny>, Py<PyAny>)> {
         let state = self.json()?;
         let state = PyTuple::new(py, vec![state])?.extract()?;
         let from_json = PyModule::import(py, "lance.fragment")?
@@ -618,7 +618,7 @@ impl PyRowIdMeta {
         Ok(Self(row_id_meta))
     }
 
-    fn __reduce__(&self, py: Python<'_>) -> PyResult<(PyObject, PyObject)> {
+    fn __reduce__(&self, py: Python<'_>) -> PyResult<(Py<PyAny>, Py<PyAny>)> {
         let state = self.json()?;
         let state = PyTuple::new(py, vec![state])?.extract()?;
         let from_json = PyModule::import(py, "lance.fragment")?
@@ -648,7 +648,7 @@ pub struct FragmentSession {
 #[pymethods]
 impl FragmentSession {
     #[pyo3(signature=(indices))]
-    pub fn take(self_: PyRef<'_, Self>, indices: Vec<u32>) -> PyResult<PyObject> {
+    pub fn take(self_: PyRef<'_, Self>, indices: Vec<u32>) -> PyResult<Py<PyAny>> {
         let session = self_.session.clone();
         let batch = rt()
             .spawn(

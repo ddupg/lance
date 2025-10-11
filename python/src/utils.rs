@@ -115,7 +115,7 @@ impl KMeans {
         Ok(())
     }
 
-    fn predict(&self, py: Python, array: &Bound<PyAny>) -> PyResult<PyObject> {
+    fn predict(&self, py: Python, array: &Bound<PyAny>) -> PyResult<Py<PyAny>> {
         let Some(kmeans) = self.trained_kmeans.as_ref() else {
             return Err(PyRuntimeError::new_err("KMeans must fit (train) first"));
         };
@@ -148,7 +148,7 @@ impl KMeans {
         cluster_ids.into_data().to_pyarrow(py)
     }
 
-    fn centroids(&self, py: Python) -> PyResult<PyObject> {
+    fn centroids(&self, py: Python) -> PyResult<Py<PyAny>> {
         if let Some(kmeans) = self.trained_kmeans.as_ref() {
             let centroids: Float32Array = kmeans.centroids.as_primitive().clone();
             let fixed_size_arr =
@@ -243,7 +243,7 @@ impl Hnsw {
         Ok(())
     }
 
-    fn vectors(&self, py: Python) -> PyResult<PyObject> {
+    fn vectors(&self, py: Python) -> PyResult<Py<PyAny>> {
         self.vectors.to_data().to_pyarrow(py)
     }
 }
@@ -263,7 +263,7 @@ where
 }
 
 /// Export a Vec of Lance types to a Python object.
-pub fn export_vec<'a, T>(py: Python<'a>, vec: &'a [T]) -> PyResult<Vec<PyObject>>
+pub fn export_vec<'a, T>(py: Python<'a>, vec: &'a [T]) -> PyResult<Vec<Py<PyAny>>>
 where
     PyLance<&'a T>: IntoPyObject<'a>,
 {
