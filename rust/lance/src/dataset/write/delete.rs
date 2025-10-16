@@ -1,9 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright The Lance Authors
 
+use super::retry::{execute_with_retry, RetryConfig, RetryExecutor};
+use super::CommitBuilder;
 use crate::dataset::rowids::get_row_id_index;
+use crate::dataset::transaction::TransactionBuilder;
 use crate::{
-    dataset::transaction::{Operation, Transaction},
+    dataset::transaction::{Operation},
     dataset::utils::make_rowid_capture_stream,
     Dataset,
 };
@@ -15,12 +18,9 @@ use lance_core::{Error, Result, ROW_ID};
 use lance_table::format::Fragment;
 use roaring::RoaringTreemap;
 use snafu::location;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 use std::time::Duration;
-
-use super::retry::{execute_with_retry, RetryConfig, RetryExecutor};
-use super::CommitBuilder;
 
 /// Apply deletions to fragments based on a RoaringTreemap of row IDs.
 ///
@@ -98,6 +98,8 @@ pub struct DeleteBuilder {
     predicate: String,
     conflict_retries: u32,
     retry_timeout: Duration,
+
+    transaction_properties: Option<Arc<HashMap<String, String>>>,
 }
 
 impl DeleteBuilder {
@@ -108,6 +110,7 @@ impl DeleteBuilder {
             predicate: predicate.into(),
             conflict_retries: 10,
             retry_timeout: Duration::from_secs(30),
+            transaction_properties: None,
         }
     }
 
@@ -123,11 +126,17 @@ impl DeleteBuilder {
         self
     }
 
+    pub fn transaction_properties(mut self, properties: Arc<HashMap<String, String>>) -> Self {
+        self.transaction_properties = Some(properties);
+        self
+    }
+
     /// Execute the delete operation
     pub async fn execute(self) -> Result<Arc<Dataset>> {
         let job = DeleteJob {
             dataset: self.dataset.clone(),
             predicate: self.predicate,
+            transaction_properties: self.transaction_properties,
         };
 
         let config = RetryConfig {
@@ -144,6 +153,8 @@ impl DeleteBuilder {
 struct DeleteJob {
     dataset: Arc<Dataset>,
     predicate: String,
+
+    transaction_properties: Option<Arc<HashMap<String, String>>>,
 }
 
 /// Data returned by delete operation
@@ -234,12 +245,9 @@ impl RetryExecutor for DeleteJob {
             deleted_fragment_ids: data.deleted_fragment_ids,
             predicate: self.predicate.clone(),
         };
-        let transaction = Transaction::new(
-            dataset.manifest.version,
-            operation,
-            /*blobs_op=*/ None,
-            None,
-        );
+        let transaction = TransactionBuilder::new(dataset.manifest.version, operation)
+            .transaction_properties(self.transaction_properties.clone())
+            .build();
 
         let mut builder = CommitBuilder::new(dataset);
 
@@ -274,7 +282,7 @@ mod tests {
     use crate::utils::test::TestDatasetGenerator;
     use arrow::array::AsArray;
     use arrow::datatypes::UInt32Type;
-    use arrow_array::{RecordBatch, UInt32Array};
+    use arrow_array::{RecordBatch, RecordBatchIterator, UInt32Array};
     use arrow_schema::{DataType, Field as ArrowField, Schema as ArrowSchema};
     use futures::TryStreamExt;
     use lance_core::utils::tempfile::TempStrDir;
@@ -799,6 +807,7 @@ mod tests {
         let delete_job = DeleteJob {
             dataset: dataset_arc.clone(),
             predicate: "true".to_string(),
+            transaction_properties: None,
         };
         let delete_data = delete_job.execute_impl().await.unwrap();
 
@@ -841,5 +850,38 @@ mod tests {
             .unwrap();
         // All rows should be deleted, including the updated ones
         assert_eq!(final_dataset.count_rows(None).await.unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_commit_message() {
+        let schema = Arc::new(ArrowSchema::new(vec![
+            ArrowField::new("id", DataType::UInt32, false),
+            ArrowField::new("value", DataType::UInt32, false),
+        ]));
+
+        let batch = RecordBatch::try_new(
+            schema.clone(),
+            vec![
+                Arc::new(UInt32Array::from_iter_values(0..100)),
+                Arc::new(UInt32Array::from_iter_values(std::iter::repeat_n(100, 100))),
+            ],
+        )
+        .unwrap();
+        let reader = RecordBatchIterator::new(vec![batch].into_iter().map(Ok), schema.clone());
+
+        let dataset = Dataset::write(reader, "memory://test", None).await.unwrap();
+        let dataset_arc = Arc::new(dataset);
+
+        let mut trans_props = HashMap::new();
+        trans_props.insert("delete_prop".to_string(), "delete_value".to_string());
+        let deleted_ds = DeleteBuilder::new(dataset_arc, "id > 50")
+            .transaction_properties(Arc::new(trans_props))
+            .execute()
+            .await
+            .unwrap();
+        let trans = deleted_ds.read_transaction_by_version(2).await.unwrap().unwrap();
+        let props = trans.transaction_properties.unwrap();
+        assert_eq!(props.len(), 1);
+        assert_eq!(props.get("delete_prop").unwrap(), "delete_value");
     }
 }
