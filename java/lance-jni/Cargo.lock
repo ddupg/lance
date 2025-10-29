@@ -138,15 +138,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "ar_archive_writer"
-version = "0.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f0c269894b6fe5e9d7ada0cf69b5bf847ff35bc25fc271f08e1d080fce80339a"
-dependencies = [
- "object",
-]
-
-[[package]]
 name = "arc-swap"
 version = "1.7.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3594,10 +3585,13 @@ name = "lance-geo"
 version = "1.1.0-beta.2"
 dependencies = [
  "datafusion",
+ "geo-traits",
  "geo-types",
  "geoarrow-array",
  "geoarrow-schema",
  "geodatafusion",
+ "lance-core",
+ "serde",
 ]
 
 [[package]]
@@ -3626,6 +3620,9 @@ dependencies = [
  "dirs",
  "fst",
  "futures",
+ "geo-types",
+ "geoarrow-array",
+ "geoarrow-schema",
  "half",
  "itertools 0.13.0",
  "jsonb",
@@ -3635,6 +3632,7 @@ dependencies = [
  "lance-datagen",
  "lance-encoding",
  "lance-file",
+ "lance-geo",
  "lance-io",
  "lance-linalg",
  "lance-table",
@@ -4366,15 +4364,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "object"
-version = "0.32.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a6a622008b6e321afc04970976f62ee297fdbaa6f95318ca343e3eebb9648441"
-dependencies = [
- "memchr",
-]
-
-[[package]]
 name = "object_store"
 version = "0.12.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4930,11 +4919,10 @@ dependencies = [
 
 [[package]]
 name = "psm"
-version = "0.1.28"
+version = "0.1.27"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d11f2fedc3b7dafdc2851bc52f277377c5473d378859be234bc7ebb593144d01"
+checksum = "e66fcd288453b748497d8fb18bccc83a16b0518e3906d4b8df0a8d42d93dbb1c"
 dependencies = [
- "ar_archive_writer",
  "cc",
 ]
 
