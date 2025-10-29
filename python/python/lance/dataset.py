@@ -2341,6 +2341,7 @@ class LanceDataset(pa.dataset.Dataset):
             Literal["NGRAM"],
             Literal["ZONEMAP"],
             Literal["BLOOMFILTER"],
+            Literal["RTREE"],
             IndexConfig,
         ],
         name: Optional[str] = None,
@@ -2426,8 +2427,8 @@ class LanceDataset(pa.dataset.Dataset):
             or string column.
         index_type : str
             The type of the index.  One of ``"BTREE"``, ``"BITMAP"``,
-            ``"LABEL_LIST"``, ``"NGRAM"``, ``"ZONEMAP"``, ``"INVERTED"``, or
-            ``"BLOOMFILTER"``.
+            ``"LABEL_LIST"``, ``"NGRAM"``, ``"ZONEMAP"``, ``"INVERTED"``,
+            ``"BLOOMFILTER"``, ``"RTREE"``.
         name : str, optional
             The index name. If not provided, it will be generated from the
             column name.
@@ -2544,11 +2545,12 @@ class LanceDataset(pa.dataset.Dataset):
                 "LABEL_LIST",
                 "INVERTED",
                 "BLOOMFILTER",
+                "RTREE",
             ]:
                 raise NotImplementedError(
                     (
                         'Only "BTREE", "BITMAP", "NGRAM", "ZONEMAP", "LABEL_LIST", '
-                        '"INVERTED", or "BLOOMFILTER" are supported for '
+                        '"INVERTED", "BLOOMFILTER" or "RTREE" are supported for '
                         f"scalar columns.  Received {index_type}",
                     )
                 )
