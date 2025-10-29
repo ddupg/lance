@@ -1781,6 +1781,7 @@ impl Dataset {
             "ZONEMAP" => IndexType::ZoneMap,
             "BLOOMFILTER" => IndexType::BloomFilter,
             "LABEL_LIST" => IndexType::LabelList,
+            "RTREE" => IndexType::RTree,
             "INVERTED" => IndexType::Inverted,
             "IVF_FLAT" | "IVF_PQ" | "IVF_SQ" | "IVF_RQ" | "IVF_HNSW_FLAT" | "IVF_HNSW_PQ"
             | "IVF_HNSW_SQ" => IndexType::Vector,
@@ -1815,6 +1816,10 @@ impl Dataset {
             }),
             "BLOOMFILTER" => Box::new(ScalarIndexParams {
                 index_type: "bloomfilter".to_string(),
+                params: None,
+            }),
+            "RTREE" => Box::new(ScalarIndexParams {
+                index_type: "rtree".to_string(),
                 params: None,
             }),
             "SCALAR" => {
