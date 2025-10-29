@@ -2342,6 +2342,7 @@ class LanceDataset(pa.dataset.Dataset):
             Literal["NGRAM"],
             Literal["ZONEMAP"],
             Literal["BLOOMFILTER"],
+            Literal["RTREE"],
             IndexConfig,
         ],
         name: Optional[str] = None,
@@ -2545,11 +2546,12 @@ class LanceDataset(pa.dataset.Dataset):
                 "LABEL_LIST",
                 "INVERTED",
                 "BLOOMFILTER",
+                "RTREE",
             ]:
                 raise NotImplementedError(
                     (
                         'Only "BTREE", "BITMAP", "NGRAM", "ZONEMAP", "LABEL_LIST", '
-                        'or "INVERTED" or "BLOOMFILTER" are supported for '
+                        '"INVERTED", "BLOOMFILTER" or "RTREE" are supported for '
                         f"scalar columns.  Received {index_type}",
                     )
                 )
