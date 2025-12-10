@@ -338,6 +338,8 @@ pub extern "system" fn Java_org_lance_Dataset_createWithFfiSchema<'local>(
     data_storage_version: JObject,  // Optional<String>
     storage_options_obj: JObject,   // Map<String, String>
     s3_credentials_refresh_offset_seconds_obj: JObject, // Optional<Long>
+    initial_bases: JObject,
+    target_bases: JObject,
 ) -> JObject<'local> {
     ok_or_throw!(
         env,
@@ -352,7 +354,9 @@ pub extern "system" fn Java_org_lance_Dataset_createWithFfiSchema<'local>(
             enable_stable_row_ids,
             data_storage_version,
             storage_options_obj,
-            s3_credentials_refresh_offset_seconds_obj
+            s3_credentials_refresh_offset_seconds_obj,
+            initial_bases,
+            target_bases,
         )
     )
 }
@@ -370,6 +374,8 @@ fn inner_create_with_ffi_schema<'local>(
     data_storage_version: JObject,  // Optional<String>
     storage_options_obj: JObject,   // Map<String, String>
     s3_credentials_refresh_offset_seconds_obj: JObject, // Optional<Long>
+    initial_bases: JObject,
+    target_bases: JObject,
 ) -> Result<JObject<'local>> {
     let c_schema_ptr = arrow_schema_addr as *mut FFI_ArrowSchema;
     let c_schema = unsafe { FFI_ArrowSchema::from_raw(c_schema_ptr) };
@@ -388,6 +394,8 @@ fn inner_create_with_ffi_schema<'local>(
         storage_options_obj,
         JObject::null(), // No provider for schema-only creation
         s3_credentials_refresh_offset_seconds_obj,
+        initial_bases,
+        target_bases,
         reader,
     )
 }
@@ -420,6 +428,8 @@ pub extern "system" fn Java_org_lance_Dataset_createWithFfiStream<'local>(
     data_storage_version: JObject,  // Optional<String>
     storage_options_obj: JObject,   // Map<String, String>
     s3_credentials_refresh_offset_seconds_obj: JObject, // Optional<Long>
+    initial_bases: JObject,
+    target_bases: JObject,
 ) -> JObject<'local> {
     ok_or_throw!(
         env,
@@ -435,7 +445,9 @@ pub extern "system" fn Java_org_lance_Dataset_createWithFfiStream<'local>(
             data_storage_version,
             storage_options_obj,
             JObject::null(),
-            s3_credentials_refresh_offset_seconds_obj
+            s3_credentials_refresh_offset_seconds_obj,
+            initial_bases,
+            target_bases
         )
     )
 }
@@ -455,6 +467,8 @@ pub extern "system" fn Java_org_lance_Dataset_createWithFfiStreamAndProvider<'lo
     storage_options_obj: JObject,          // Map<String, String>
     storage_options_provider_obj: JObject, // Optional<StorageOptionsProvider>
     s3_credentials_refresh_offset_seconds_obj: JObject, // Optional<Long>
+    initial_bases: JObject,                // Optional<List<BasePath>>
+    target_bases: JObject,                 // Optional<List<String>>
 ) -> JObject<'local> {
     ok_or_throw!(
         env,
@@ -470,7 +484,9 @@ pub extern "system" fn Java_org_lance_Dataset_createWithFfiStreamAndProvider<'lo
             data_storage_version,
             storage_options_obj,
             storage_options_provider_obj,
-            s3_credentials_refresh_offset_seconds_obj
+            s3_credentials_refresh_offset_seconds_obj,
+            initial_bases,
+            target_bases
         )
     )
 }
@@ -489,6 +505,8 @@ fn inner_create_with_ffi_stream<'local>(
     storage_options_obj: JObject,          // Map<String, String>
     storage_options_provider_obj: JObject, // Optional<StorageOptionsProvider>
     s3_credentials_refresh_offset_seconds_obj: JObject, // Optional<Long>
+    initial_bases: JObject,                // Optional<List<BasePath>>
+    target_bases: JObject,                 // Optional<List<String>>
 ) -> Result<JObject<'local>> {
     let stream_ptr = arrow_array_stream_addr as *mut FFI_ArrowArrayStream;
     let reader = unsafe { ArrowArrayStreamReader::from_raw(stream_ptr) }?;
@@ -504,6 +522,8 @@ fn inner_create_with_ffi_stream<'local>(
         storage_options_obj,
         storage_options_provider_obj,
         s3_credentials_refresh_offset_seconds_obj,
+        initial_bases,
+        target_bases,
         reader,
     )
 }
@@ -521,6 +541,8 @@ fn create_dataset<'local>(
     storage_options_obj: JObject,
     storage_options_provider_obj: JObject, // Optional<StorageOptionsProvider>
     s3_credentials_refresh_offset_seconds_obj: JObject,
+    initial_bases: JObject,
+    target_bases: JObject,
     reader: impl RecordBatchReader + Send + 'static,
 ) -> Result<JObject<'local>> {
     let path_str = path.extract(env)?;
@@ -536,6 +558,8 @@ fn create_dataset<'local>(
         &storage_options_obj,
         &storage_options_provider_obj,
         &s3_credentials_refresh_offset_seconds_obj,
+        &initial_bases,
+        &target_bases,
     )?;
 
     let dataset = BlockingDataset::write(reader, &path_str, Some(write_params))?;

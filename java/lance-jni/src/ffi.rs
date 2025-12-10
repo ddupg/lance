@@ -68,6 +68,8 @@ pub trait JNIEnvExt {
     fn get_vec_f32_from_method(&mut self, obj: &JObject, method_name: &str) -> Result<Vec<f32>>;
     // Get int as usize from Java Object with given method name.
     fn get_int_as_usize_from_method(&mut self, obj: &JObject, method_name: &str) -> Result<usize>;
+    // Get u32 int from Java Object with given method name.
+    fn get_u32_from_method(&mut self, obj: &JObject, method_name: &str) -> Result<u32>;
     // Get u64 int from Java Object with given method name.
     fn get_u64_from_method(&mut self, obj: &JObject, method_name: &str) -> Result<u64>;
     // Get boolean from Java Object with given method name.
@@ -296,6 +298,10 @@ impl JNIEnvExt for JNIEnv<'_> {
 
     fn get_int_as_usize_from_method(&mut self, obj: &JObject, method_name: &str) -> Result<usize> {
         Ok(self.call_method(obj, method_name, "()I", &[])?.i()? as usize)
+    }
+
+    fn get_u32_from_method(&mut self, obj: &JObject, method_name: &str) -> Result<u32> {
+        Ok(self.call_method(obj, method_name, "()I", &[])?.i()? as u32)
     }
 
     fn get_u64_from_method(&mut self, obj: &JObject, method_name: &str) -> Result<u64> {

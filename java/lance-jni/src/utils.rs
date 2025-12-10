@@ -23,6 +23,7 @@ use crate::error::{Error, Result};
 use crate::ffi::JNIEnvExt;
 use crate::storage_options::JavaStorageOptionsProvider;
 
+use lance::table::format::BasePath;
 use lance_index::vector::Query;
 use lance_io::object_store::StorageOptionsProvider;
 use std::collections::HashMap;
@@ -49,6 +50,8 @@ pub fn extract_write_params(
     storage_options_obj: &JObject,
     storage_options_provider_obj: &JObject, // Optional<StorageOptionsProvider>
     s3_credentials_refresh_offset_seconds_obj: &JObject, // Optional<Long>
+    initial_bases: &JObject,
+    target_bases: &JObject,
 ) -> Result<WriteParams> {
     let mut write_params = WriteParams::default();
 
@@ -91,6 +94,35 @@ pub fn extract_write_params(
         .get_long_opt(s3_credentials_refresh_offset_seconds_obj)?
         .map(|v| std::time::Duration::from_secs(v as u64))
         .unwrap_or_else(|| std::time::Duration::from_secs(10));
+
+    env.get_optional(initial_bases, |env, opt_obj| {
+        let list_obj = env
+            .call_method(opt_obj, "get", "()Ljava/lang/Object;", &[])?
+            .l()?;
+        let list = env.get_list(&list_obj)?;
+        let mut iter = list.iter(env)?;
+        let mut bases: Vec<BasePath> = Vec::with_capacity(list.size(env)? as usize);
+        while let Some(elem) = iter.next(env)? {
+            let id = env.get_u32_from_method(&elem, "getId")?;
+            let name = env.get_optional_string_from_method(&elem, "getName")?;
+            let path = env.get_string_from_method(&elem, "getPath")?;
+            let is_dataset_root = env.get_boolean_from_method(&elem, "isDatasetRoot")?;
+            bases.push(BasePath {
+                id,
+                name,
+                path,
+                is_dataset_root,
+            });
+        }
+
+        write_params.initial_bases = Some(bases);
+        Ok(())
+    })?;
+
+    let target_bases_names = env.get_strings_opt(target_bases)?;
+    if let Some(names) = target_bases_names {
+        write_params.target_base_names_or_paths = Some(names);
+    }
 
     write_params.store_params = Some(ObjectStoreParams {
         storage_options: Some(storage_options),
