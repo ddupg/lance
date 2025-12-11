@@ -68,7 +68,7 @@ from .types import _coerce_reader
 from .udf import BatchUDF, normalize_transform
 from .udf import BatchUDFCheckpoint as BatchUDFCheckpoint
 from .udf import batch_udf as batch_udf
-from .util import _target_partition_size_to_num_partitions, td_to_micros, dt_to_micros
+from .util import _target_partition_size_to_num_partitions, dt_to_micros, td_to_micros
 
 if TYPE_CHECKING:
     from pyarrow._compute import Expression
@@ -2366,7 +2366,10 @@ class LanceDataset(pa.dataset.Dataset):
         """
         before_ts_micros = dt_to_micros(before_ts) if before_ts is not None else None
         return self._ds.cleanup_with_policy(
-            before_ts_micros, retain_versions, delete_unverified, error_if_tagged_old_versions
+            before_ts_micros,
+            retain_versions,
+            delete_unverified,
+            error_if_tagged_old_versions,
         )
 
     def create_scalar_index(
