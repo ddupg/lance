@@ -5351,7 +5351,7 @@ class CleanupPolicy:
         before_ts: Optional[datetime] = None,
         retain_versions: Optional[int] = None,
         delete_unverified: bool = False,
-        error_if_tagged_old_versions: bool = True
+        error_if_tagged_old_versions: bool = True,
     ):
         """
         Cleanup policy for dataset version retention.
