@@ -55,6 +55,7 @@ from .lance import (
     IOStats,
     LanceSchema,
     ScanStatistics,
+    _CleanupPolicy,
     _Dataset,
     _MergeInsertBuilder,
     _Scanner,
@@ -2330,47 +2331,11 @@ class LanceDataset(pa.dataset.Dataset):
             td_to_micros(older_than), delete_unverified, error_if_tagged_old_versions
         )
 
-    def cleanup_with_policy(
-        self,
-        before_ts: Optional[datetime] = None,
-        retain_versions: Optional[int] = None,
-        delete_unverified: bool = False,
-        error_if_tagged_old_versions: bool = True,
-    ) -> CleanupStats:
+    def cleanup_with_policy(self, policy: CleanupPolicy) -> CleanupStats:
         """
-        Cleanup old versions of the dataset with a custom policy.
-        Parameters
-        ----------
-        before_ts: Optional[datetime] = None,
-            Only versions before this timestamp will be removed.
-
-        retain_versions: Optional[int] = None,
-            The number of versions to retain.
-
-        delete_unverified: bool = False,
-            Files leftover from a failed transaction may appear to be part of an
-            in-progress operation (e.g. appending new data) and these files will
-            not be deleted unless they are at least 7 days old.  If delete_unverified
-            is True then these files will be deleted regardless of their age.
-            This should only be set to True if you can guarantee that no other process
-            is currently working on this dataset.  Otherwise the dataset could be put
-            into a corrupted state.
-
-        error_if_tagged_old_versions: bool = True,
-            Some versions may have tags associated with them. Tagged versions will
-            not be cleaned up, regardless of how old they are. If this argument
-            is set to `True` (the default), an exception will be raised if any
-            tagged versions match the parameters. Otherwise, tagged versions will
-            be ignored without any error and only untagged versions will be
-            cleaned up.
+        Cleanup old versions of the dataset using a CleanupPolicy.
         """
-        before_ts_micros = dt_to_micros(before_ts) if before_ts is not None else None
-        return self._ds.cleanup_with_policy(
-            before_ts_micros,
-            retain_versions,
-            delete_unverified,
-            error_if_tagged_old_versions,
-        )
+        return self._ds.cleanup_with_policy(policy._policy)
 
     def create_scalar_index(
         self,
@@ -5377,6 +5342,52 @@ class LanceStats:
         Statistics about the data in the dataset.
         """
         return self._ds.data_stats()
+
+
+@dataclass
+class CleanupPolicy:
+    def __init__(
+        self,
+        before_ts: Optional[datetime] = None,
+        retain_versions: Optional[int] = None,
+        delete_unverified: bool = False,
+        error_if_tagged_old_versions: bool = True
+    ):
+        """
+        Cleanup policy for dataset version retention.
+
+        Parameters
+        ----------
+        before_ts: Optional[datetime], default None
+            Retain versions before this timestamp.
+
+        retain_versions: Optional[int], default None
+            Retain this number of versions.
+
+        delete_unverified: bool, default False
+            Files leftover from a failed transaction may appear to be part of an
+            in-progress operation (e.g. appending new data) and these files will
+            not be deleted unless they are at least 7 days old.  If delete_unverified
+            is True then these files will be deleted regardless of their age.
+
+            This should only be set to True if you can guarantee that no other process
+            is currently working on this dataset.  Otherwise the dataset could be put
+            into a corrupted state.
+
+        error_if_tagged_old_versions: bool, default True
+            Some versions may have tags associated with them. Tagged versions will
+            not be cleaned up, regardless of how old they are. If this argument
+            is set to `True` (the default), an exception will be raised if any
+            tagged versions match the parameters. Otherwise, tagged versions will
+            be ignored without any error and only untagged versions will be
+            cleaned up.
+        """
+        self._policy = _CleanupPolicy(
+            before_ts_micros=dt_to_micros(before_ts) if before_ts else None,
+            retain_versions=retain_versions,
+            delete_unverified=delete_unverified,
+            error_if_tagged_old_versions=error_if_tagged_old_versions,
+        )
 
 
 def write_dataset(

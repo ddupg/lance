@@ -90,7 +90,7 @@ use fragment::{FileFragment, PyDeletionFile, PyRowDatasetVersionMeta, PyRowIdMet
 pub use indices::register_indices;
 pub use reader::LanceReader;
 pub use scanner::Scanner;
-
+use crate::dataset::PyCleanupPolicy;
 use crate::executor::BackgroundExecutor;
 
 const CLIENT_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -239,6 +239,7 @@ fn lance(py: Python, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Dataset>()?;
     m.add_class::<DatasetBasePath>()?;
     m.add_class::<FileFragment>()?;
+    m.add_class::<PyCleanupPolicy>()?;
     m.add_class::<PyDeletionFile>()?;
     m.add_class::<PyRowIdMeta>()?;
     m.add_class::<PyRowDatasetVersionMeta>()?;
