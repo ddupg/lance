@@ -445,6 +445,38 @@ impl From<DatasetBasePath> for BasePath {
     }
 }
 
+#[pyclass(name = "_CleanupPolicy", module = "lance")]
+#[derive(Clone)]
+pub struct PyCleanupPolicy {
+    #[pyo3(get)]
+    pub before_ts_micros: Option<u64>,
+    #[pyo3(get)]
+    pub retain_versions: Option<usize>,
+    #[pyo3(get)]
+    pub delete_unverified: Option<bool>,
+    #[pyo3(get)]
+    pub error_if_tagged_old_versions: Option<bool>,
+}
+
+#[pymethods]
+impl PyCleanupPolicy {
+    #[new]
+    #[pyo3(signature = (before_ts_micros = None, retain_versions = None, delete_unverified = None, error_if_tagged_old_versions = None))]
+    fn new(
+        before_ts_micros: Option<u64>,
+        retain_versions: Option<usize>,
+        delete_unverified: Option<bool>,
+        error_if_tagged_old_versions: Option<bool>,
+    ) -> Self {
+        Self {
+            before_ts_micros,
+            retain_versions,
+            delete_unverified,
+            error_if_tagged_old_versions,
+        }
+    }
+}
+
 /// Lance Dataset that will be wrapped by another class in Python
 #[pyclass(name = "_Dataset", module = "_lib")]
 #[derive(Clone)]
@@ -1522,33 +1554,25 @@ impl Dataset {
     }
 
     /// Cleanup old versions from the dataset with a custom policy
-    #[pyo3(signature = (before_timestamp_micros = None, retain_versions = None, delete_unverified = None, error_if_tagged_old_versions = None))]
-    fn cleanup_with_policy(
-        &self,
-        before_timestamp_micros: Option<i64>,
-        retain_versions: Option<usize>,
-        delete_unverified: Option<bool>,
-        error_if_tagged_old_versions: Option<bool>,
-    ) -> PyResult<CleanupStats> {
+    #[pyo3(signature = (policy))]
+    fn cleanup_with_policy(&self, policy: PyCleanupPolicy) -> PyResult<CleanupStats> {
         let cleanup_stats = rt()
             .block_on(None, async {
                 let mut builder = CleanupPolicyBuilder::default();
-                if let Some(micros) = before_timestamp_micros {
+                if let Some(micros) = policy.before_ts_micros {
                     let ts = DateTime::<Utc>::from(
-                        UNIX_EPOCH + std::time::Duration::from_micros(micros as u64),
+                        UNIX_EPOCH + std::time::Duration::from_micros(micros),
                     );
                     builder = builder.before_timestamp(ts);
                 }
-                if let Some(retain_versions) = retain_versions {
-                    builder = builder
-                        .retain_n_versions(self.ds.as_ref(), retain_versions)
-                        .await?;
+                if let Some(v) = policy.retain_versions {
+                    builder = builder.retain_n_versions(self.ds.as_ref(), v).await?;
                 }
-                if let Some(delete_unverified) = delete_unverified {
-                    builder = builder.delete_unverified(delete_unverified);
+                if let Some(v) = policy.delete_unverified {
+                    builder = builder.delete_unverified(v);
                 }
-                if let Some(error_if_tagged_old_versions) = error_if_tagged_old_versions {
-                    builder = builder.error_if_tagged_old_versions(error_if_tagged_old_versions);
+                if let Some(v) = policy.error_if_tagged_old_versions {
+                    builder = builder.error_if_tagged_old_versions(v);
                 }
 
                 self.ds.cleanup_with_policy(builder.build()).await
