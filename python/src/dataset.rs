@@ -1,10 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright The Lance Authors
 
-use std::collections::HashMap;
-use std::str;
-use std::sync::Arc;
-
 use arrow::array::AsArray;
 use arrow::datatypes::UInt8Type;
 use arrow::ffi_stream::ArrowArrayStreamReader;
@@ -15,7 +11,7 @@ use arrow_data::ArrayData;
 use arrow_schema::{DataType, Schema as ArrowSchema};
 use async_trait::async_trait;
 use blob::LanceBlobFile;
-use chrono::{Duration, TimeDelta};
+use chrono::{DateTime, Duration, TimeDelta, Utc};
 use futures::{StreamExt, TryFutureExt};
 use lance_index::vector::bq::RQBuildParams;
 use log::error;
@@ -32,7 +28,12 @@ use pyo3::{
 };
 use pyo3::{prelude::*, IntoPyObjectExt};
 use snafu::location;
+use std::collections::HashMap;
+use std::str;
+use std::sync::Arc;
+use std::time::UNIX_EPOCH;
 
+use lance::dataset::cleanup::CleanupPolicyBuilder;
 use lance::dataset::index::LanceIndexStoreExt;
 use lance::dataset::refs::{Ref, TagContents};
 use lance::dataset::scanner::{
@@ -1513,6 +1514,45 @@ impl Dataset {
                     error_if_tagged_old_versions,
                 ),
             )?
+            .map_err(|err: lance::Error| PyIOError::new_err(err.to_string()))?;
+        Ok(CleanupStats {
+            bytes_removed: cleanup_stats.bytes_removed,
+            old_versions: cleanup_stats.old_versions,
+        })
+    }
+
+    /// Cleanup old versions from the dataset with a custom policy
+    #[pyo3(signature = (before_timestamp_micros = None, retain_versions = None, delete_unverified = None, error_if_tagged_old_versions = None))]
+    fn cleanup_with_policy(
+        &self,
+        before_timestamp_micros: Option<i64>,
+        retain_versions: Option<usize>,
+        delete_unverified: Option<bool>,
+        error_if_tagged_old_versions: Option<bool>,
+    ) -> PyResult<CleanupStats> {
+        let cleanup_stats = rt()
+            .block_on(None, async {
+                let mut builder = CleanupPolicyBuilder::default();
+                if let Some(micros) = before_timestamp_micros {
+                    let ts = DateTime::<Utc>::from(
+                        UNIX_EPOCH + std::time::Duration::from_micros(micros as u64),
+                    );
+                    builder = builder.before_timestamp(ts);
+                }
+                if let Some(retain_versions) = retain_versions {
+                    builder = builder
+                        .retain_n_versions(self.ds.as_ref(), retain_versions)
+                        .await?;
+                }
+                if let Some(delete_unverified) = delete_unverified {
+                    builder = builder.delete_unverified(delete_unverified);
+                }
+                if let Some(error_if_tagged_old_versions) = error_if_tagged_old_versions {
+                    builder = builder.error_if_tagged_old_versions(error_if_tagged_old_versions);
+                }
+
+                self.ds.cleanup_with_policy(builder.build()).await
+            })?
             .map_err(|err: lance::Error| PyIOError::new_err(err.to_string()))?;
         Ok(CleanupStats {
             bytes_removed: cleanup_stats.bytes_removed,

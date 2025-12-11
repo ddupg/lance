@@ -298,6 +298,13 @@ class _Dataset:
         delete_unverified: Optional[bool] = None,
         error_if_tagged_old_versions: Optional[bool] = None,
     ) -> CleanupStats: ...
+    def cleanup_with_policy(
+        self,
+        before_timestamp_micros: Optional[int] = None,
+        retain_versions: Optional[int] = None,
+        delete_unverified: Optional[bool] = None,
+        error_if_tagged_old_versions: Optional[bool] = None,
+    ) -> CleanupStats: ...
     def get_version(self, tag: str) -> int: ...
     # Tag operations
     def tags(self) -> Dict[str, Tag]: ...

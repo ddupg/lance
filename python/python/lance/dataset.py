@@ -68,7 +68,7 @@ from .types import _coerce_reader
 from .udf import BatchUDF, normalize_transform
 from .udf import BatchUDFCheckpoint as BatchUDFCheckpoint
 from .udf import batch_udf as batch_udf
-from .util import _target_partition_size_to_num_partitions, td_to_micros
+from .util import _target_partition_size_to_num_partitions, td_to_micros, dt_to_micros
 
 if TYPE_CHECKING:
     from pyarrow._compute import Expression
@@ -2328,6 +2328,45 @@ class LanceDataset(pa.dataset.Dataset):
             older_than = timedelta(days=14)
         return self._ds.cleanup_old_versions(
             td_to_micros(older_than), delete_unverified, error_if_tagged_old_versions
+        )
+
+    def cleanup_with_policy(
+        self,
+        before_ts: Optional[datetime] = None,
+        retain_versions: Optional[int] = None,
+        delete_unverified: bool = False,
+        error_if_tagged_old_versions: bool = True,
+    ) -> CleanupStats:
+        """
+        Cleanup old versions of the dataset with a custom policy.
+        Parameters
+        ----------
+        before_ts: Optional[datetime] = None,
+            Only versions before this timestamp will be removed.
+
+        retain_versions: Optional[int] = None,
+            The number of versions to retain.
+
+        delete_unverified: bool = False,
+            Files leftover from a failed transaction may appear to be part of an
+            in-progress operation (e.g. appending new data) and these files will
+            not be deleted unless they are at least 7 days old.  If delete_unverified
+            is True then these files will be deleted regardless of their age.
+            This should only be set to True if you can guarantee that no other process
+            is currently working on this dataset.  Otherwise the dataset could be put
+            into a corrupted state.
+
+        error_if_tagged_old_versions: bool = True,
+            Some versions may have tags associated with them. Tagged versions will
+            not be cleaned up, regardless of how old they are. If this argument
+            is set to `True` (the default), an exception will be raised if any
+            tagged versions match the parameters. Otherwise, tagged versions will
+            be ignored without any error and only untagged versions will be
+            cleaned up.
+        """
+        before_ts_micros = dt_to_micros(before_ts) if before_ts is not None else None
+        return self._ds.cleanup_with_policy(
+            before_ts_micros, retain_versions, delete_unverified, error_if_tagged_old_versions
         )
 
     def create_scalar_index(
