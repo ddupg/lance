@@ -1181,6 +1181,43 @@ def test_cleanup_around_tagged_old_versions(tmp_path):
     assert stats.old_versions == 1
 
 
+def test_cleanup_with_policy_retain_versions(tmp_path: Path):
+    base_dir = tmp_path / "cleanup_policy"
+    table = pa.Table.from_pydict({"a": range(100), "b": range(100)})
+    lance.write_dataset(table, base_dir, mode="create")
+    time.sleep(0.05)
+    lance.write_dataset(table, base_dir, mode="overwrite")
+    time.sleep(0.05)
+    lance.write_dataset(table, base_dir, mode="overwrite")
+    time.sleep(0.05)
+    ds = lance.write_dataset(table, base_dir, mode="append")
+
+    assert len(ds.versions()) == 4
+    stats = ds.cleanup_with_policy(retain_versions=3)
+    assert stats.old_versions == 1
+    assert len(ds.versions()) == 3
+    assert ds.count_rows() == len(ds.to_table())
+
+
+def test_cleanup_with_policy_before_ts_and_retain_versions(tmp_path: Path):
+    base_dir = tmp_path / "cleanup_policy"
+    table = pa.Table.from_pydict({"a": range(100), "b": range(100)})
+    lance.write_dataset(table, base_dir, mode="create")
+    time.sleep(0.05)
+    lance.write_dataset(table, base_dir, mode="overwrite")
+    time.sleep(0.05)
+    lance.write_dataset(table, base_dir, mode="overwrite")
+    time.sleep(0.05)
+    ds = lance.write_dataset(table, base_dir, mode="append")
+
+    before_ts = datetime.now()
+    stats = ds.cleanup_with_policy(before_ts=before_ts, retain_versions=2)
+    print(stats)
+    assert stats.old_versions == 2
+    assert len(ds.versions()) == 2
+    assert ds.count_rows() == len(ds.to_table())
+
+
 def test_auto_cleanup(tmp_path):
     table = pa.Table.from_pydict({"a": range(100), "b": range(100)})
     base_dir = tmp_path / "test"
