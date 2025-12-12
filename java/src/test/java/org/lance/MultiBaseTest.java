@@ -13,6 +13,8 @@
  */
 package org.lance;
 
+import org.lance.fragment.DataFile;
+
 import org.apache.arrow.memory.BufferAllocator;
 import org.apache.arrow.memory.RootAllocator;
 import org.apache.arrow.vector.IntVector;
@@ -36,11 +38,11 @@ import java.nio.file.Path;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Optional;
+import java.util.Set;
+import java.util.stream.Collectors;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
-import static org.junit.jupiter.api.Assertions.assertTrue;
 
 public class MultiBaseTest {
   private BufferAllocator allocator;
@@ -102,12 +104,12 @@ public class MultiBaseTest {
   }
 
   @Test
-  public void testCreateAndRead() throws Exception {
+  public void testCreateMode() throws Exception {
     ArrowStreamReader reader = makeReader(0, 500);
     List<BasePath> bases =
         Arrays.asList(
-            new BasePath(0, Optional.of("base1"), base1, true),
-            new BasePath(0, Optional.of("base2"), base2, true));
+            new BasePath(0, Optional.of("base1"), base1, false),
+            new BasePath(0, Optional.of("base2"), base2, false));
 
     Dataset ds =
         Dataset.write()
@@ -130,8 +132,8 @@ public class MultiBaseTest {
     ArrowStreamReader initReader = makeReader(0, 300);
     List<BasePath> bases =
         Arrays.asList(
-            new BasePath(0, Optional.of("base1"), base1, true),
-            new BasePath(0, Optional.of("base2"), base2, true));
+            new BasePath(0, Optional.of("base1"), base1, false),
+            new BasePath(0, Optional.of("base2"), base2, false));
 
     Dataset base =
         Dataset.write()
@@ -163,8 +165,8 @@ public class MultiBaseTest {
     ArrowStreamReader initReader = makeReader(0, 200);
     List<BasePath> bases =
         Arrays.asList(
-            new BasePath(0, Optional.of("base1"), base1, true),
-            new BasePath(0, Optional.of("base2"), base2, true));
+            new BasePath(0, Optional.of("base1"), base1, false),
+            new BasePath(0, Optional.of("base2"), base2, false));
 
     Dataset.write()
         .allocator(allocator)
@@ -191,39 +193,12 @@ public class MultiBaseTest {
   }
 
   @Test
-  public void testIsDatasetRootFlag() throws Exception {
-    ArrowStreamReader reader = makeReader(0, 100);
-    List<BasePath> bases =
-        Arrays.asList(
-            new BasePath(0, Optional.of("base1"), base1.toString(), true),
-            new BasePath(0, Optional.of("base2"), base2.toString(), false));
-
-    Dataset ds =
-        Dataset.write()
-            .allocator(allocator)
-            .reader(reader)
-            .uri(primary)
-            .mode(WriteParams.WriteMode.CREATE)
-            .initialBases(bases)
-            .targetBases(Arrays.asList("base1"))
-            .maxRowsPerFile(50)
-            .execute();
-
-    List<Fragment> frags = ds.getFragments();
-    assertFalse(frags.isEmpty());
-    // base1 writes should have baseId present; base2 not used here
-    boolean anyBaseIdPresent =
-        frags.stream().anyMatch(f -> f.metadata().getFiles().get(0).getBaseId().isPresent());
-    assertTrue(anyBaseIdPresent);
-  }
-
-  @Test
   public void testTargetByPathUri() throws Exception {
     ArrowStreamReader reader = makeReader(0, 100);
     List<BasePath> bases =
         Arrays.asList(
             new BasePath(0, Optional.of("base1"), base1, true),
-            new BasePath(0, Optional.of("base2"), base2, true));
+            new BasePath(0, Optional.of("base2"), base2, false));
 
     Dataset ds =
         Dataset.write()
@@ -235,6 +210,14 @@ public class MultiBaseTest {
             .targetBases(Arrays.asList("base1"))
             .maxRowsPerFile(50)
             .execute();
+
+    Set<Integer> baseIds =
+        ds.getFragments().stream()
+            .flatMap(f -> f.metadata().getFiles().stream().map(DataFile::getBaseId))
+            .filter(Optional::isPresent)
+            .map(Optional::get)
+            .collect(Collectors.toSet());
+    assertEquals(1, baseIds.size());
 
     ArrowStreamReader append = makeReader(100, 50);
     Dataset updated =
@@ -248,9 +231,12 @@ public class MultiBaseTest {
             .execute();
 
     assertEquals(150, updated.countRows());
-    List<Fragment> frags = updated.getFragments();
-    long base2Count =
-        frags.stream().filter(f -> f.metadata().getFiles().get(0).getBaseId().isPresent()).count();
-    assertTrue(base2Count >= 2);
+    baseIds =
+        updated.getFragments().stream()
+            .flatMap(f -> f.metadata().getFiles().stream().map(DataFile::getBaseId))
+            .filter(Optional::isPresent)
+            .map(Optional::get)
+            .collect(Collectors.toSet());
+    assertEquals(2, baseIds.size());
   }
 }

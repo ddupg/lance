@@ -62,6 +62,11 @@ pub trait JNIEnvExt {
     /// Get Option<&[u8]> from Java Optional<ByteBuffer>.
     fn get_bytes_opt(&mut self, obj: &JObject) -> Result<Option<&[u8]>>;
 
+    /// Get Option<Vec<T>> from Java Optional<List<T>>
+    fn get_list_opt<T, F>(&mut self, obj: &JObject, f: F) -> Result<Option<Vec<T>>>
+    where
+        F: Fn(&mut JNIEnv, &JObject) -> Result<T>;
+
     // Get String from Java Object with given method name.
     fn get_string_from_method(&mut self, obj: &JObject, method_name: &str) -> Result<String>;
     // Get float array from Java Object with given method name.
@@ -276,6 +281,25 @@ impl JNIEnvExt for JNIEnv<'_> {
             let capacity = env.get_direct_buffer_capacity(&j_byte_buffer)?;
             let data = unsafe { slice::from_raw_parts(raw_data, capacity) };
             Ok(data)
+        })
+    }
+
+    fn get_list_opt<T, F>(&mut self, obj: &JObject, f: F) -> Result<Option<Vec<T>>>
+    where
+        F: Fn(&mut JNIEnv, &JObject) -> Result<T>,
+    {
+        self.get_optional(obj, |env, opt_obj| {
+            let list_obj = env
+                .call_method(opt_obj, "get", "()Ljava/lang/Object;", &[])?
+                .l()?;
+            let list = env.get_list(&list_obj)?;
+            let mut iter = list.iter(env)?;
+            let mut items: Vec<T> = Vec::with_capacity(list.size(env)? as usize);
+            while let Some(elem) = iter.next(env)? {
+                items.push(f(env, &elem)?);
+            }
+
+            Ok(items)
         })
     }
 

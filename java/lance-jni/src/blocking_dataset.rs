@@ -36,8 +36,8 @@ use lance::dataset::{
     Version, WriteParams,
 };
 use lance::io::{ObjectStore, ObjectStoreParams};
-use lance::table::format::Fragment;
 use lance::table::format::IndexMetadata;
+use lance::table::format::{BasePath, Fragment};
 use lance_core::datatypes::Schema as LanceSchema;
 use lance_index::scalar::btree::BTreeParameters;
 use lance_index::scalar::lance_format::LanceIndexStore;
@@ -53,6 +53,21 @@ use std::sync::Arc;
 use std::time::{Duration, UNIX_EPOCH};
 
 pub const NATIVE_DATASET: &str = "nativeDatasetHandle";
+
+impl FromJObjectWithEnv<BasePath> for JObject<'_> {
+    fn extract_object(&self, env: &mut JNIEnv<'_>) -> Result<BasePath> {
+        let id = env.get_u32_from_method(self, "getId")?;
+        let name = env.get_optional_string_from_method(self, "getName")?;
+        let path = env.get_string_from_method(self, "getPath")?;
+        let is_dataset_root = env.get_boolean_from_method(self, "isDatasetRoot")?;
+        Ok(BasePath {
+            id,
+            name,
+            path,
+            is_dataset_root,
+        })
+    }
+}
 
 #[derive(Clone)]
 pub struct BlockingDataset {
