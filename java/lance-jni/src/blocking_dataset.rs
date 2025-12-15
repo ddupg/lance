@@ -1039,60 +1039,18 @@ fn inner_open_native<'local>(
     let storage_options = to_rust_map(env, &jmap)?;
 
     // Extract storage options provider first (before get_bytes_opt which borrows env)
-    let storage_options_provider = if !storage_options_provider_obj.is_null() {
-        // Check if it's an Optional.empty()
-        let is_present = env
-            .call_method(&storage_options_provider_obj, "isPresent", "()Z", &[])?
-            .z()?;
-        if is_present {
-            // Get the value from Optional
-            let provider_obj = env
-                .call_method(
-                    &storage_options_provider_obj,
-                    "get",
-                    "()Ljava/lang/Object;",
-                    &[],
-                )?
-                .l()?;
-            Some(JavaStorageOptionsProvider::new(env, provider_obj)?)
-        } else {
-            None
-        }
-    } else {
-        None
-    };
+    let storage_options_provider = env
+        .get_optional(&storage_options_provider_obj, |env, provider_obj| {
+            JavaStorageOptionsProvider::new(env, provider_obj)
+        })?;
 
     let storage_options_provider_arc =
         storage_options_provider.map(|v| Arc::new(v) as Arc<dyn StorageOptionsProvider>);
 
     // Extract s3_credentials_refresh_offset_seconds
-    let s3_credentials_refresh_offset_seconds =
-        if !s3_credentials_refresh_offset_seconds_obj.is_null() {
-            let is_present = env
-                .call_method(
-                    &s3_credentials_refresh_offset_seconds_obj,
-                    "isPresent",
-                    "()Z",
-                    &[],
-                )?
-                .z()?;
-            if is_present {
-                let value = env
-                    .call_method(
-                        &s3_credentials_refresh_offset_seconds_obj,
-                        "get",
-                        "()Ljava/lang/Object;",
-                        &[],
-                    )?
-                    .l()?;
-                let long_value = env.call_method(&value, "longValue", "()J", &[])?.j()?;
-                Some(long_value as u64)
-            } else {
-                None
-            }
-        } else {
-            None
-        };
+    let s3_credentials_refresh_offset_seconds = env
+        .get_long_opt(&s3_credentials_refresh_offset_seconds_obj)?
+        .map(|v| v as u64);
 
     let serialized_manifest = env.get_bytes_opt(&serialized_manifest)?;
     let dataset = BlockingDataset::open(
@@ -1404,7 +1362,7 @@ fn inner_shallow_clone<'local>(
 ) -> Result<JObject<'local>> {
     let target_path_str = target_path.extract(env)?;
     let storage_options = env.get_optional(&storage_options, |env, map_obj| {
-        let jmap = JMap::from_env(env, map_obj)?;
+        let jmap = JMap::from_env(env, &map_obj)?;
         to_rust_map(env, &jmap)
     })?;
 
@@ -1830,18 +1788,13 @@ fn inner_add_columns_by_sql_expressions(
 
     let rust_transform = NewColumnTransform::SqlExpressions(expressions);
 
-    let batch_size = if env.call_method(&batch_size, "isPresent", "()Z", &[])?.z()? {
-        let batch_size_value = env.get_long_opt(&batch_size)?;
-        match batch_size_value {
-            Some(value) => Some(
-                value
-                    .try_into()
-                    .map_err(|_| Error::input_error("Batch size conversion error".to_string()))?,
-            ),
-            None => None,
-        }
-    } else {
-        None
+    let batch_size = match env.get_long_opt(&batch_size)? {
+        Some(value) => Some(
+            value
+                .try_into()
+                .map_err(|_| Error::input_error("Batch size conversion error".to_string()))?,
+        ),
+        None => None,
     };
 
     let mut dataset_guard =
@@ -1880,18 +1833,13 @@ fn inner_add_columns_by_reader(
 
     let transform = NewColumnTransform::Reader(Box::new(reader));
 
-    let batch_size = if env.call_method(&batch_size, "isPresent", "()Z", &[])?.z()? {
-        let batch_size_value = env.get_long_opt(&batch_size)?;
-        match batch_size_value {
-            Some(value) => Some(
-                value
-                    .try_into()
-                    .map_err(|_| Error::input_error("Batch size conversion error".to_string()))?,
-            ),
-            None => None,
-        }
-    } else {
-        None
+    let batch_size = match env.get_long_opt(&batch_size)? {
+        Some(value) => Some(
+            value
+                .try_into()
+                .map_err(|_| Error::input_error("Batch size conversion error".to_string()))?,
+        ),
+        None => None,
     };
 
     let mut dataset_guard =
