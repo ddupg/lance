@@ -18,7 +18,40 @@ Sorting does not change the R-Tree data structure, but it is critical to perform
 
 Hilbert sorting imposes a linear order on 2D items using a space-filling Hilbert curve to maximize locality in both axes. This improves leaf clustering, which benefits query pruning.
 
-Items are mapped to a 16‑bit grid per axis (0..65535) by proportionally normalizing bbox centers within the global bounding box. Using a fast 2D Hilbert algorithm, we compute a 32‑bit `u32` key for each item and sort items in ascending order by this Hilbert value.
+Hilbert sorting is performed in three steps:
+
+1. **Global bounding box**: compute the global bbox `[xmin_g, ymin_g, xmax_g, ymax_g]` over all items for training index.
+2. **Normalize and compute Hilbert value**:
+    - For each item bbox `[xmin_i, ymin_i, xmax_i, ymax_i]`, compute its center:
+        - `cx = (xmin_i + xmax_i) / 2`
+        - `cy = (ymin_i + ymax_i) / 2`
+    - Map the center to a 16‑bit grid per axis using the global bbox. Let `W = xmax_g - xmin-g` and `H = ymax_g - ymin_g`. The normalized integer coordinates are:
+        - `xi = round(((cx - xmin_g) / W) * (2^16 - 1))`
+        - `yi = round(((cy - ymin_g) / H) * (2^16 - 1))`
+    - If the global width or height is effectively zero, the corresponding axis is treated as degenerate and set to `0` for all items (the ordering then degenerates to 1D on the other axis).
+    - For each `(xi, yi)` in `[0 .. 2^16-1] × [0 .. 2^16-1]`, compute a 32‑bit Hilbert value using a standard 2D Hilbert algorithm. In pseudocode (with `bits = 16`):
+      ```
+      fn hilbert_value(x, y, bits):
+          # x, y: integers in [0 .. 2^bits - 1]
+          h = 0
+          mask = (1 << bits) - 1
+ 
+          for s from bits-1 down to 0:
+              rx = (x >> s) & 1
+              ry = (y >> s) & 1
+              d  = ((3 * rx) XOR ry) << (2 * s)
+              h  = h | d
+ 
+              if ry == 0:
+                  if rx == 1:
+                      x = (~x) & mask
+                      y = (~y) & mask
+                  swap(x, y)
+ 
+          return h
+      ```
+      - The resulting `h` is stored as the item’s Hilbert value (type `u32` with `bits = 16`).
+3. **Sort**: sort items by Hilbert value.
 
 ## Index Details
 
@@ -52,7 +85,7 @@ The following optional keys can be used by implementations and are stored in the
 
 | Key         | Type   | Description                                       |
 |:------------|:-------|:--------------------------------------------------|
-| `page_size` | String | Page size per page (default: "4096")              |
+| `page_size` | String | Page size per page                                |
 | `num_pages` | String | Total number of pages written                     |
 | `num_items` | String | Number of non-null leaf items in the index        |
 | `bbox`      | String | JSON-serialized global BoundingBox of the dataset |
