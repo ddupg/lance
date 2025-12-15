@@ -29,7 +29,7 @@ import pytest
 from helper import ProgressForTest
 from lance._dataset.sharded_batch_iterator import ShardedBatchIterator
 from lance.commit import CommitConflictError
-from lance.dataset import LANCE_COMMIT_MESSAGE_KEY, AutoCleanupConfig, CleanupPolicy
+from lance.dataset import LANCE_COMMIT_MESSAGE_KEY, AutoCleanupConfig
 from lance.debug import format_fragment
 from lance.file import stable_version
 from lance.schema import LanceSchema
@@ -1181,7 +1181,7 @@ def test_cleanup_around_tagged_old_versions(tmp_path):
     assert stats.old_versions == 1
 
 
-def test_cleanup_with_policy_retain_versions(tmp_path: Path):
+def test_cleanup_with_retain_versions(tmp_path: Path):
     base_dir = tmp_path / "cleanup_policy"
     table = pa.Table.from_pydict({"a": range(100), "b": range(100)})
     lance.write_dataset(table, base_dir, mode="create")
@@ -1193,13 +1193,13 @@ def test_cleanup_with_policy_retain_versions(tmp_path: Path):
     ds = lance.write_dataset(table, base_dir, mode="append")
 
     assert len(ds.versions()) == 4
-    stats = ds.cleanup_with_policy(CleanupPolicy(retain_versions=3))
+    stats = ds.cleanup_old_versions(retain_versions=3)
     assert stats.old_versions == 1
     assert len(ds.versions()) == 3
     assert ds.count_rows() == len(ds.to_table())
 
 
-def test_cleanup_with_policy_before_ts_and_retain_versions(tmp_path: Path):
+def test_cleanup_with_older_than_and_retain_versions(tmp_path: Path):
     base_dir = tmp_path / "cleanup_policy"
     table = pa.Table.from_pydict({"a": range(100), "b": range(100)})
     lance.write_dataset(table, base_dir, mode="create")
@@ -1207,12 +1207,12 @@ def test_cleanup_with_policy_before_ts_and_retain_versions(tmp_path: Path):
     lance.write_dataset(table, base_dir, mode="overwrite")
     time.sleep(0.05)
     lance.write_dataset(table, base_dir, mode="overwrite")
+    moment = datetime.now()
     time.sleep(0.05)
     ds = lance.write_dataset(table, base_dir, mode="append")
 
-    before_ts = datetime.now()
-    stats = ds.cleanup_with_policy(
-        CleanupPolicy(before_ts=before_ts, retain_versions=2)
+    stats = ds.cleanup_old_versions(
+        older_than=datetime.now() - moment, retain_versions=2
     )
     print(stats)
     assert stats.old_versions == 2

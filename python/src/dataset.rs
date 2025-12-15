@@ -1,6 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright The Lance Authors
 
+use std::collections::HashMap;
+use std::str;
+use std::sync::Arc;
+
 use arrow::array::AsArray;
 use arrow::datatypes::UInt8Type;
 use arrow::ffi_stream::ArrowArrayStreamReader;
@@ -11,7 +15,7 @@ use arrow_data::ArrayData;
 use arrow_schema::{DataType, Schema as ArrowSchema};
 use async_trait::async_trait;
 use blob::LanceBlobFile;
-use chrono::{DateTime, Duration, TimeDelta, Utc};
+use chrono::{Duration, TimeDelta, Utc};
 use futures::{StreamExt, TryFutureExt};
 use lance_index::vector::bq::RQBuildParams;
 use log::error;
@@ -28,10 +32,6 @@ use pyo3::{
 };
 use pyo3::{prelude::*, IntoPyObjectExt};
 use snafu::location;
-use std::collections::HashMap;
-use std::str;
-use std::sync::Arc;
-use std::time::UNIX_EPOCH;
 
 use lance::dataset::cleanup::CleanupPolicyBuilder;
 use lance::dataset::index::LanceIndexStoreExt;
@@ -442,38 +442,6 @@ impl From<DatasetBasePath> for BasePath {
             py_base_path.name,
             py_base_path.is_dataset_root,
         )
-    }
-}
-
-#[pyclass(name = "_CleanupPolicy", module = "lance")]
-#[derive(Clone)]
-pub struct PyCleanupPolicy {
-    #[pyo3(get)]
-    pub before_ts_micros: Option<u64>,
-    #[pyo3(get)]
-    pub retain_versions: Option<usize>,
-    #[pyo3(get)]
-    pub delete_unverified: Option<bool>,
-    #[pyo3(get)]
-    pub error_if_tagged_old_versions: Option<bool>,
-}
-
-#[pymethods]
-impl PyCleanupPolicy {
-    #[new]
-    #[pyo3(signature = (before_ts_micros = None, retain_versions = None, delete_unverified = None, error_if_tagged_old_versions = None))]
-    fn new(
-        before_ts_micros: Option<u64>,
-        retain_versions: Option<usize>,
-        delete_unverified: Option<bool>,
-        error_if_tagged_old_versions: Option<bool>,
-    ) -> Self {
-        Self {
-            before_ts_micros,
-            retain_versions,
-            delete_unverified,
-            error_if_tagged_old_versions,
-        }
     }
 }
 
@@ -1529,49 +1497,28 @@ impl Dataset {
     }
 
     /// Cleanup old versions from the dataset
-    #[pyo3(signature = (older_than_micros, delete_unverified = None, error_if_tagged_old_versions = None))]
+    #[pyo3(signature = (older_than_micros = None, retain_versions = None, delete_unverified = None, error_if_tagged_old_versions = None))]
     fn cleanup_old_versions(
         &self,
-        older_than_micros: i64,
+        older_than_micros: Option<i64>,
+        retain_versions: Option<usize>,
         delete_unverified: Option<bool>,
         error_if_tagged_old_versions: Option<bool>,
     ) -> PyResult<CleanupStats> {
-        let older_than = Duration::microseconds(older_than_micros);
-        let cleanup_stats = rt()
-            .block_on(
-                None,
-                self.ds.cleanup_old_versions(
-                    older_than,
-                    delete_unverified,
-                    error_if_tagged_old_versions,
-                ),
-            )?
-            .map_err(|err: lance::Error| PyIOError::new_err(err.to_string()))?;
-        Ok(CleanupStats {
-            bytes_removed: cleanup_stats.bytes_removed,
-            old_versions: cleanup_stats.old_versions,
-        })
-    }
-
-    /// Cleanup old versions from the dataset with a custom policy
-    #[pyo3(signature = (policy))]
-    fn cleanup_with_policy(&self, policy: PyCleanupPolicy) -> PyResult<CleanupStats> {
         let cleanup_stats = rt()
             .block_on(None, async {
                 let mut builder = CleanupPolicyBuilder::default();
-                if let Some(micros) = policy.before_ts_micros {
-                    let ts = DateTime::<Utc>::from(
-                        UNIX_EPOCH + std::time::Duration::from_micros(micros),
-                    );
-                    builder = builder.before_timestamp(ts);
+                if let Some(v) = older_than_micros {
+                    let older_than = Duration::microseconds(v);
+                    builder = builder.before_timestamp(Utc::now() - older_than);
                 }
-                if let Some(v) = policy.retain_versions {
+                if let Some(v) = retain_versions {
                     builder = builder.retain_n_versions(self.ds.as_ref(), v).await?;
                 }
-                if let Some(v) = policy.delete_unverified {
+                if let Some(v) = delete_unverified {
                     builder = builder.delete_unverified(v);
                 }
-                if let Some(v) = policy.error_if_tagged_old_versions {
+                if let Some(v) = error_if_tagged_old_versions {
                     builder = builder.error_if_tagged_old_versions(v);
                 }
 

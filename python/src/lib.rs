@@ -78,8 +78,6 @@ pub(crate) mod transaction;
 pub(crate) mod utils;
 
 pub use crate::arrow::{bfloat16_array, BFloat16};
-use crate::dataset::PyCleanupPolicy;
-use crate::executor::BackgroundExecutor;
 use crate::file::LanceFileSession;
 use crate::fragment::{write_fragments, write_fragments_transaction};
 use crate::tracing::{capture_trace_events, shutdown_tracing, PyTraceEvent};
@@ -92,6 +90,8 @@ use fragment::{FileFragment, PyDeletionFile, PyRowDatasetVersionMeta, PyRowIdMet
 pub use indices::register_indices;
 pub use reader::LanceReader;
 pub use scanner::Scanner;
+
+use crate::executor::BackgroundExecutor;
 
 const CLIENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -239,7 +239,6 @@ fn lance(py: Python, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Dataset>()?;
     m.add_class::<DatasetBasePath>()?;
     m.add_class::<FileFragment>()?;
-    m.add_class::<PyCleanupPolicy>()?;
     m.add_class::<PyDeletionFile>()?;
     m.add_class::<PyRowIdMeta>()?;
     m.add_class::<PyRowDatasetVersionMeta>()?;

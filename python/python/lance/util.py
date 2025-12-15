@@ -51,11 +51,6 @@ def td_to_micros(td: timedelta) -> int:
     return round(td / timedelta(microseconds=1))
 
 
-def dt_to_micros(dt: datetime) -> int:
-    """Returns the number of microseconds in a datetime object."""
-    return round(dt.timestamp() * 1e6)
-
-
 class KMeans:
     """KMean model for clustering.
 
