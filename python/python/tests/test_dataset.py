@@ -1214,7 +1214,6 @@ def test_cleanup_with_older_than_and_retain_versions(tmp_path: Path):
     stats = ds.cleanup_old_versions(
         older_than=datetime.now() - moment, retain_versions=2
     )
-    print(stats)
     assert stats.old_versions == 2
     assert len(ds.versions()) == 2
     assert ds.count_rows() == len(ds.to_table())
