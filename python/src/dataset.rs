@@ -389,7 +389,7 @@ impl<'py> IntoPyObject<'py> for PyLance<&ColumnOrdering> {
 }
 
 /// Python binding for BasePath
-#[pyclass(name = "DatasetBasePath", module = "lance")]
+#[pyclass(name = "DatasetBasePath", module = "_lib")]
 #[derive(Clone)]
 pub struct DatasetBasePath {
     #[pyo3(get)]

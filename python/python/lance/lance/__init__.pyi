@@ -582,5 +582,14 @@ class ScanStatistics:
         str, int
     ]  # Additional metrics for debugging purposes. Subject to change.
 
+class DatasetBasePath:
+    def __init__(
+        self,
+        path: str,
+        name: Optional[str] = None,
+        is_dataset_root: bool = False,
+        id: Optional[int] = None,
+    ) -> None: ...
+
 __version__: str
 language_model_home: Callable[[], str]
