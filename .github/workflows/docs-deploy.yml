@@ -67,30 +67,11 @@ jobs:
       - name: Copy lance-namespace-impls docs
         run: |
           # Copy implementation specs to the integrations folder
-          cp lance-namespace-impls/docs/src/hive2.md docs/src/format/namespace/integrations/
-          cp lance-namespace-impls/docs/src/hive3.md docs/src/format/namespace/integrations/
-          cp lance-namespace-impls/docs/src/iceberg.md docs/src/format/namespace/integrations/
-          cp lance-namespace-impls/docs/src/polaris.md docs/src/format/namespace/integrations/
-          cp lance-namespace-impls/docs/src/unity.md docs/src/format/namespace/integrations/
-          cp lance-namespace-impls/docs/src/glue.md docs/src/format/namespace/integrations/
-          cp lance-namespace-impls/docs/src/gravitino.md docs/src/format/namespace/integrations/
-          cp lance-namespace-impls/docs/src/onelake.md docs/src/format/namespace/integrations/
-          cp lance-namespace-impls/docs/src/dataproc.md docs/src/format/namespace/integrations/
+          cp lance-namespace-impls/docs/src/*.md docs/src/format/namespace/integrations/
 
-          # Generate .pages for integrations (alphabetical order)
-          cat > docs/src/format/namespace/integrations/.pages << 'EOF'
-          nav:
-            - Apache Gravitino: gravitino.md
-            - Apache Hive MetaStore V2: hive2.md
-            - Apache Hive MetaStore V3: hive3.md
-            - Apache Iceberg REST Catalog: iceberg.md
-            - Apache Polaris: polaris.md
-            - AWS Glue: glue.md
-            - Google Dataproc: dataproc.md
-            - Microsoft OneLake: onelake.md
-            - Unity Catalog: unity.md
-            - Template for New Integrations: template.md
-          EOF
+          # Copy .pages from lance-namespace-impls and append template entry
+          cp lance-namespace-impls/docs/src/.pages docs/src/format/namespace/integrations/.pages
+          echo "  - Template for New Integrations: template.md" >> docs/src/format/namespace/integrations/.pages
       - name: Copy lance-spark docs
         run: |
           cp -r lance-spark/docs/src docs/src/integrations/spark
