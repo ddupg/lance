@@ -229,3 +229,68 @@ async fn test_geo_rtree_index() {
 
     assert_intersects_sql(&mut dataset, true).await;
 }
+
+#[tokio::test]
+async fn test_geo_scan() {
+    // 1. Creates arrow table with point and linestring spatial data
+    let point_type = PointType::new(Dimension::XY, Default::default());
+
+    let schema = arrow_schema::Schema::new(vec![
+        point_type.clone().to_field("point", true),
+    ]);
+    let schema = Arc::new(schema) as arrow_schema::SchemaRef;
+
+    let mut point_builder = PointBuilder::new(point_type.clone());
+    point_builder.push_point(Some(&geo_types::point!(x: -72.1235, y: 42.3521)));
+    let point_arr = point_builder.finish();
+
+    let batch = RecordBatch::try_new(
+        schema.clone(),
+        vec![point_arr.to_array_ref()],
+    )
+        .unwrap();
+
+    // 2. Write to lance
+    let lance_path = TempStrDir::default();
+    let reader = RecordBatchIterator::new(vec![batch].into_iter().map(Ok), schema.clone());
+    let dataset = Dataset::write(reader, &lance_path, Some(Default::default()))
+        .await
+        .unwrap();
+
+    let x = dataset.scan()
+        .project(&["point"]).unwrap()
+        .filter("st_distance(point, st_point(0, 0)) < 5").unwrap()
+        .try_into_batch().await.unwrap();
+    println!("{:?}", x);
+}
+
+#[tokio::test]
+async fn test_geo_sql2() {
+    // 1. Creates arrow table with point and linestring spatial data
+    let point_type = PointType::new(Dimension::XY, Default::default());
+
+    let schema = arrow_schema::Schema::new(vec![
+        point_type.clone().to_field("point", true),
+    ]);
+    let schema = Arc::new(schema) as arrow_schema::SchemaRef;
+
+    let mut point_builder = PointBuilder::new(point_type.clone());
+    point_builder.push_point(Some(&geo_types::point!(x: -72.1235, y: 42.3521)));
+    let point_arr = point_builder.finish();
+
+    let batch = RecordBatch::try_new(
+        schema.clone(),
+        vec![point_arr.to_array_ref()],
+    )
+        .unwrap();
+
+    // 2. Write to lance
+    let lance_path = TempStrDir::default();
+    let reader = RecordBatchIterator::new(vec![batch].into_iter().map(Ok), schema.clone());
+    let dataset = Dataset::write(reader, &lance_path, Some(Default::default()))
+        .await
+        .unwrap();
+
+    let res = dataset.sql("select * from dataset where st_distance(point, st_point(0, 0)) < 5").build().await.unwrap().into_batch_records().await.unwrap();
+    println!("{:?}", res);
+}
