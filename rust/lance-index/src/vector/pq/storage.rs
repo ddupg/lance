@@ -23,7 +23,7 @@ use async_trait::async_trait;
 use bytes::{Bytes, BytesMut};
 use deepsize::DeepSizeOf;
 use lance_arrow::{FixedSizeListArrayExt, RecordBatchExt};
-use lance_core::{Error, ROW_ID, Result};
+use lance_core::{Error, ROW_ID, Result, assume_eq};
 use lance_file::previous::{
     reader::FileReader as PreviousFileReader, writer::FileWriter as PreviousFileWriter,
 };
@@ -922,6 +922,58 @@ impl DistCalculator for PQDistCalculator {
                 );
                 let diff = self.num_sub_vectors as f32 - 1.0;
                 dot_dists.into_iter().map(|v| v - diff).collect()
+            }
+            _ => unimplemented!("distance type is not supported: {:?}", self.distance_type),
+        }
+    }
+
+    fn distance_all_with_scratch(
+        &self,
+        k_hint: usize,
+        dists: &mut Vec<f32>,
+        _u16_scratch: &mut Vec<u16>,
+        _u8_scratch: &mut Vec<u8>,
+    ) {
+        let pq_code = self.pq_code.values();
+        if pq_code.is_empty() {
+            dists.clear();
+            return;
+        }
+        if self.num_bits != 8 {
+            *dists = self.distance_all(k_hint);
+            return;
+        }
+
+        let num_vectors = pq_code.len() / self.num_sub_vectors;
+        dists.clear();
+        dists.resize(num_vectors, 0.0);
+
+        const NUM_CENTROIDS: usize = 2_usize.pow(8);
+        for (sub_vec_idx, vec_indices) in pq_code.chunks_exact(num_vectors).enumerate() {
+            let dist_table = &self.distance_table
+                [sub_vec_idx * NUM_CENTROIDS..(sub_vec_idx + 1) * NUM_CENTROIDS];
+            assume_eq!(dist_table.len(), NUM_CENTROIDS);
+            assume_eq!(vec_indices.len(), dists.len());
+            vec_indices
+                .iter()
+                .zip(dists.iter_mut())
+                .for_each(|(&centroid_idx, sum)| {
+                    *sum += dist_table[centroid_idx as usize];
+                });
+        }
+
+        match self.distance_type {
+            DistanceType::L2 => {}
+            DistanceType::Cosine => {
+                for dist in dists {
+                    *dist /= 2.0;
+                }
+            }
+            DistanceType::Dot => {
+                let diff = self.num_sub_vectors as f32 - 1.0;
+                for dist in dists {
+                    *dist -= diff;
+                }
             }
             _ => unimplemented!("distance type is not supported: {:?}", self.distance_type),
         }
