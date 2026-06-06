@@ -23,7 +23,6 @@ use arrow_array::{
     types::{ArrowPrimitiveType, Float16Type, Float32Type, Float64Type, UInt8Type},
 };
 use arrow_array::{ArrowNumericType, UInt8Array};
-use arrow_ord::sort::sort_to_indices;
 use arrow_schema::{ArrowError, DataType};
 use bitvec::prelude::*;
 use lance_arrow::FixedSizeListArrayExt;
@@ -1319,13 +1318,7 @@ pub fn kmeans_find_partitions<T: Float + L2 + Dot>(
         }
     };
 
-    // TODO: use heap to just keep nprobes smallest values.
-    let dists_arr = Float32Array::from(dists);
-    let indices = sort_to_indices(&dists_arr, None, Some(nprobes))?;
-    let dists = arrow::compute::take(&dists_arr, &indices, None)?
-        .as_primitive::<Float32Type>()
-        .clone();
-    Ok((indices, dists))
+    Ok(top_k_partition_indices(dists, nprobes))
 }
 
 pub fn kmeans_find_partitions_binary(
@@ -1344,13 +1337,49 @@ pub fn kmeans_find_partitions_binary(
         }
     };
 
-    // TODO: use heap to just keep nprobes smallest values.
-    let dists_arr = Float32Array::from(dists);
-    let indices = sort_to_indices(&dists_arr, None, Some(nprobes))?;
-    let dists = arrow::compute::take(&dists_arr, &indices, None)?
-        .as_primitive::<Float32Type>()
-        .clone();
-    Ok((indices, dists))
+    Ok(top_k_partition_indices(dists, nprobes))
+}
+
+fn top_k_partition_indices(dists: Vec<f32>, nprobes: usize) -> (UInt32Array, Float32Array) {
+    let limit = nprobes.min(dists.len());
+    if limit == 0 {
+        return (
+            UInt32Array::from_iter_values(std::iter::empty()),
+            Float32Array::from_iter_values(std::iter::empty()),
+        );
+    }
+
+    let mut best: Vec<(u32, f32)> = Vec::with_capacity(limit);
+
+    for (idx, dist) in dists.into_iter().enumerate() {
+        if best.len() == limit {
+            let Some(last) = best.last() else {
+                continue;
+            };
+            if !partition_distance_less((idx as u32, dist), *last) {
+                continue;
+            }
+        }
+
+        let insert_at =
+            best.partition_point(|existing| partition_distance_less(*existing, (idx as u32, dist)));
+        best.insert(insert_at, (idx as u32, dist));
+        if best.len() > limit {
+            best.pop();
+        }
+    }
+
+    let indices = UInt32Array::from_iter_values(best.iter().map(|(idx, _)| *idx));
+    let distances = Float32Array::from_iter_values(best.into_iter().map(|(_, dist)| dist));
+    (indices, distances)
+}
+
+fn partition_distance_less(left: (u32, f32), right: (u32, f32)) -> bool {
+    match left.1.total_cmp(&right.1) {
+        Ordering::Less => true,
+        Ordering::Equal => left.0 < right.0,
+        Ordering::Greater => false,
+    }
 }
 
 /// Compute partitions from Arrow FixedSizeListArray.
@@ -1590,6 +1619,21 @@ mod tests {
             DistanceType::L2,
         );
         assert_eq!(expected, actual);
+    }
+
+    #[test]
+    fn test_top_k_partition_indices() {
+        let (indices, distances) = top_k_partition_indices(vec![3.0, 1.0, 2.0, 1.0, 4.0], 3);
+        assert_eq!(indices.values(), &[1, 3, 2]);
+        assert_eq!(distances.values(), &[1.0, 1.0, 2.0]);
+
+        let (indices, distances) = top_k_partition_indices(vec![2.0, 1.0], 4);
+        assert_eq!(indices.values(), &[1, 0]);
+        assert_eq!(distances.values(), &[1.0, 2.0]);
+
+        let (indices, distances) = top_k_partition_indices(vec![2.0, 1.0], 0);
+        assert!(indices.is_empty());
+        assert!(distances.is_empty());
     }
 
     #[test]
