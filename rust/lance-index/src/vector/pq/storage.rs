@@ -161,6 +161,7 @@ pub struct ProductQuantizationStorage {
 
     // For easy access
     pq_code: Arc<UInt8Array>,
+    row_major_pq_code: Arc<OnceLock<UInt8Array>>,
     row_ids: Arc<UInt64Array>,
     pairwise_distance_table: Arc<OnceLock<Vec<f32>>>,
 }
@@ -178,6 +179,11 @@ impl DeepSizeOf for ProductQuantizationStorage {
                 .pairwise_distance_table
                 .get()
                 .map(|table| table.deep_size_of_children(_context))
+                .unwrap_or(0)
+            + self
+                .row_major_pq_code
+                .get()
+                .map(|codes| codes.get_array_memory_size())
                 .unwrap_or(0)
     }
 }
@@ -313,6 +319,7 @@ impl ProductQuantizationStorage {
             pq_code,
             row_ids,
             pairwise_distance_table: Arc::new(OnceLock::new()),
+            row_major_pq_code: Arc::new(OnceLock::new()),
         })
     }
 
@@ -457,6 +464,19 @@ impl ProductQuantizationStorage {
             .as_slice()
     }
 
+    fn row_major_pq_code(&self) -> &[u8] {
+        self.row_major_pq_code
+            .get_or_init(|| {
+                let num_bytes = if self.metadata.nbits == 4 {
+                    self.metadata.num_sub_vectors / 2
+                } else {
+                    self.metadata.num_sub_vectors
+                };
+                transpose(&self.pq_code, num_bytes, self.len())
+            })
+            .values()
+    }
+
     /// Write the PQ storage as a Lance partition to disk,
     /// and returns the number of rows written.
     ///
@@ -597,6 +617,7 @@ impl QuantizerStorage for ProductQuantizationStorage {
             distance_type: self.distance_type,
             batch,
             pq_code: Arc::new(transposed_codes),
+            row_major_pq_code: Arc::new(OnceLock::new()),
             row_ids: new_row_ids,
             pairwise_distance_table: self.pairwise_distance_table.clone(),
         })
@@ -737,21 +758,16 @@ impl VectorStore for ProductQuantizationStorage {
     }
 
     fn dist_between(&self, u: u32, v: u32) -> f32 {
-        // this is a fast way to compute distance between two vectors in the same storage.
-        // it doesn't construct the distance table.
-        let pq_codes = self.pq_code.values();
-        let u_codes = get_pq_code(
-            pq_codes,
-            self.metadata.nbits,
-            self.metadata.num_sub_vectors,
-            u,
-        );
-        let v_codes = get_pq_code(
-            pq_codes,
-            self.metadata.nbits,
-            self.metadata.num_sub_vectors,
-            v,
-        );
+        let num_bytes = if self.metadata.nbits == 4 {
+            self.metadata.num_sub_vectors / 2
+        } else {
+            self.metadata.num_sub_vectors
+        };
+        let pq_codes = self.row_major_pq_code();
+        let u_start = u as usize * num_bytes;
+        let v_start = v as usize * num_bytes;
+        let u_codes = pq_codes[u_start..u_start + num_bytes].iter().copied();
+        let v_codes = pq_codes[v_start..v_start + num_bytes].iter().copied();
         pq_code_distance(
             self.pairwise_distance_table(),
             self.metadata.nbits,
