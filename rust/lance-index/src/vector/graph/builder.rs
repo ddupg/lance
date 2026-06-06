@@ -50,15 +50,21 @@ impl GraphBuilderNode {
 
     pub(crate) fn update_from_ranked_neighbors(&mut self, level: u16) {
         let level_index = level as usize;
-        self.level_neighbors[level_index] = Arc::new(
+        let neighbors = Arc::make_mut(&mut self.level_neighbors[level_index]);
+        neighbors.clear();
+        neighbors.extend(
             self.level_neighbors_ranked[level_index]
                 .iter()
-                .map(|ordered_node| ordered_node.id)
-                .collect(),
+                .map(|ordered_node| ordered_node.id),
         );
-        if level == 0 {
-            self.bottom_neighbors = self.level_neighbors[0].clone();
-        }
+    }
+
+    pub(crate) fn sync_bottom_neighbors(&mut self) {
+        self.bottom_neighbors = self
+            .level_neighbors
+            .first()
+            .cloned()
+            .unwrap_or_else(|| Arc::new(Vec::new()));
     }
 
     pub(crate) fn cutoff(&self, level: u16, max_size: usize) -> OrderedFloat {

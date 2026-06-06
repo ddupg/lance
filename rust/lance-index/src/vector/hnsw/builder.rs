@@ -194,10 +194,13 @@ impl HNSW {
     /// builder when finalizing.
     pub(crate) fn from_parts(
         params: HnswBuildParams,
-        nodes: Vec<GraphBuilderNode>,
+        mut nodes: Vec<GraphBuilderNode>,
         level_count: Vec<usize>,
         entry_point: u32,
     ) -> Self {
+        for node in &mut nodes {
+            node.sync_bottom_neighbors();
+        }
         let queue_size = get_num_compute_intensive_cpus().max(1) * 2;
         let visited_generator_queue = Arc::new(ArrayQueue::new(queue_size));
         for _ in 0..queue_size {
@@ -507,7 +510,7 @@ impl DeepSizeOf for HnswBuilder {
 
 impl HnswBuilder {
     fn finish(self) -> HNSW {
-        let nodes = match Arc::try_unwrap(self.nodes) {
+        let mut nodes: Vec<_> = match Arc::try_unwrap(self.nodes) {
             Ok(nodes) => nodes
                 .into_iter()
                 .map(|node| node.into_inner().expect("builder lock poisoned"))
@@ -517,6 +520,9 @@ impl HnswBuilder {
                 .map(|node| node.read().expect("builder lock poisoned").clone())
                 .collect(),
         };
+        for node in &mut nodes {
+            node.sync_bottom_neighbors();
+        }
 
         let level_count = self
             .level_count
