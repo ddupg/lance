@@ -481,6 +481,45 @@ impl DistCalculator for SQDistCalculator<'_> {
         }
     }
 
+    fn distance_all_with_scratch(
+        &self,
+        _k_hint: usize,
+        dists: &mut Vec<f32>,
+        _u16_scratch: &mut Vec<u16>,
+        _u8_scratch: &mut Vec<u8>,
+    ) {
+        let query_sq_code = self.query_sq_code.as_slice();
+        let num_vectors = self.storage.len();
+        dists.clear();
+        dists.reserve(num_vectors);
+
+        match self.storage.distance_type {
+            DistanceType::L2 | DistanceType::Cosine => {
+                for chunk in &self.storage.chunks {
+                    dists.extend(
+                        chunk
+                            .sq_codes
+                            .values()
+                            .chunks_exact(chunk.dim())
+                            .map(|sq_codes| l2_u8(sq_codes, query_sq_code) as f32 * self.scale),
+                    );
+                }
+            }
+            DistanceType::Dot => {
+                for chunk in &self.storage.chunks {
+                    dists.extend(
+                        chunk
+                            .sq_codes
+                            .values()
+                            .chunks_exact(chunk.dim())
+                            .map(|sq_codes| dot_distance(sq_codes, query_sq_code) * self.scale),
+                    );
+                }
+            }
+            _ => panic!("We should not reach here: sq distance can only be L2 or Dot"),
+        }
+    }
+
     #[allow(unused_variables)]
     fn prefetch(&self, id: u32) {
         #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
