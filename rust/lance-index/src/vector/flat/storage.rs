@@ -447,6 +447,10 @@ impl<T: ArrowPrimitiveType> DistCalculator for FlatDistanceCal<'_, T> {
             .collect()
     }
 
+    fn supports_prefetch(&self) -> bool {
+        true
+    }
+
     #[inline]
     fn prefetch(&self, id: u32) {
         let vector = self.get_vector(id);
@@ -519,6 +523,10 @@ impl DistCalculator for FlatFloatDistanceCalc<'_> {
             Self::Float32(calc) => calc.distance_all(k_hint),
             Self::Float64(calc) => calc.distance_all(k_hint),
         }
+    }
+
+    fn supports_prefetch(&self) -> bool {
+        true
     }
 
     fn prefetch(&self, id: u32) {

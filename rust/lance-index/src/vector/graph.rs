@@ -260,7 +260,7 @@ fn process_neighbors_with_look_ahead<F>(
 ) where
     F: FnMut(u32),
 {
-    match look_ahead {
+    match look_ahead.filter(|_| dist_calc.supports_prefetch()) {
         Some(look_ahead) => {
             for i in 0..neighbors.len().saturating_sub(look_ahead) {
                 dist_calc.prefetch(neighbors[i + look_ahead]);

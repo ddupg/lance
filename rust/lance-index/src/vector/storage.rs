@@ -62,6 +62,10 @@ pub trait DistCalculator {
         *dists = self.distance_all(k_hint);
     }
 
+    fn supports_prefetch(&self) -> bool {
+        false
+    }
+
     fn prefetch(&self, _id: u32) {}
 }
 

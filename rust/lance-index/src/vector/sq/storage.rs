@@ -520,6 +520,10 @@ impl DistCalculator for SQDistCalculator<'_> {
         }
     }
 
+    fn supports_prefetch(&self) -> bool {
+        true
+    }
+
     #[allow(unused_variables)]
     fn prefetch(&self, id: u32) {
         #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
