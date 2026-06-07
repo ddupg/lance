@@ -768,13 +768,18 @@ impl<S: IvfSubIndex + 'static, Q: Quantization> IVFIndex<S, Q> {
     }
 
     fn query_scratch_capacity(ivf: &IvfModel) -> QueryScratchCapacity {
+        let max_partition_len = ivf.lengths.iter().copied().max().unwrap_or_default() as usize;
+
+        if S::supports_global_topk_heap() && Q::quantization_type() != QuantizationType::Rabit {
+            return QueryScratchCapacity::new(max_partition_len, 0, 0, 0);
+        }
+
         if Q::quantization_type() != QuantizationType::Rabit {
             return QueryScratchCapacity::default();
         }
 
         let dim = ivf.dimension();
         let dist_table_len = dim * 4;
-        let max_partition_len = ivf.lengths.iter().copied().max().unwrap_or_default() as usize;
 
         QueryScratchCapacity::new(
             max_partition_len,
@@ -1723,15 +1728,19 @@ mod tests {
     use lance_index::IndexType;
     use lance_index::progress::IndexBuildProgress;
     use lance_index::vector::DIST_COL;
+    use lance_index::vector::bq::builder::RabitQuantizer;
+    use lance_index::vector::flat::index::FlatIndex;
+    use lance_index::vector::hnsw::HNSW;
     use lance_index::vector::ivf::IvfBuildParams;
+    use lance_index::vector::ivf::storage::IvfModel;
     use lance_index::vector::kmeans::{KMeansParams, train_kmeans};
-    use lance_index::vector::pq::PQBuildParams;
+    use lance_index::vector::pq::{PQBuildParams, ProductQuantizer};
     use lance_index::vector::quantizer::QuantizerMetadata;
     use lance_index::vector::sq::builder::SQBuildParams;
     use lance_index::vector::{
         pq::storage::ProductQuantizationMetadata,
         sq::storage::{SQ_METADATA_KEY, ScalarQuantizationMetadata},
-        storage::STORAGE_METADATA_KEY,
+        storage::{QueryScratchCapacity, STORAGE_METADATA_KEY},
     };
     use lance_index::{INDEX_AUXILIARY_FILE_NAME, metrics::NoOpMetricsCollector};
     use lance_index::{optimize::OptimizeOptions, scalar::IndexReader};
@@ -1749,8 +1758,62 @@ mod tests {
     use rand::{Rng, SeedableRng, rngs::StdRng};
     use rstest::rstest;
 
+    use super::IVFIndex;
+
     const NUM_ROWS: usize = 512;
     const DIM: usize = 32;
+
+    fn test_ivf_model(lengths: Vec<u32>, dim: usize) -> IvfModel {
+        let centroids = FixedSizeListArray::try_new_from_values(
+            Float32Array::from(vec![0.0; lengths.len() * dim]),
+            dim as i32,
+        )
+        .unwrap();
+        let mut ivf = IvfModel::new(centroids, None);
+        ivf.lengths = lengths;
+        ivf
+    }
+
+    fn assert_scratch_capacity(
+        capacity: QueryScratchCapacity,
+        distances: usize,
+        query_f32: usize,
+        u16: usize,
+        u8: usize,
+    ) {
+        assert_eq!(capacity.distances, distances);
+        assert_eq!(capacity.query_f32, query_f32);
+        assert_eq!(capacity.u16, u16);
+        assert_eq!(capacity.u8, u8);
+    }
+
+    #[test]
+    fn query_scratch_capacity_preallocates_flat_quantized_distances() {
+        let ivf = test_ivf_model(vec![7, 11, 5], DIM);
+
+        let capacity = IVFIndex::<FlatIndex, ProductQuantizer>::query_scratch_capacity(&ivf);
+
+        assert_scratch_capacity(capacity, 11, 0, 0, 0);
+    }
+
+    #[test]
+    fn query_scratch_capacity_does_not_preallocate_hnsw_quantized_distances() {
+        let ivf = test_ivf_model(vec![7, 11, 5], DIM);
+
+        let capacity = IVFIndex::<HNSW, ProductQuantizer>::query_scratch_capacity(&ivf);
+
+        assert_scratch_capacity(capacity, 0, 0, 0, 0);
+    }
+
+    #[test]
+    fn query_scratch_capacity_preserves_rabit_scratch_buffers() {
+        let ivf = test_ivf_model(vec![7, 11, 5], DIM);
+        let dist_table_len = DIM * 4;
+
+        let capacity = IVFIndex::<FlatIndex, RabitQuantizer>::query_scratch_capacity(&ivf);
+
+        assert_scratch_capacity(capacity, 11, DIM + dist_table_len, 11, dist_table_len);
+    }
 
     lance_testing::define_stage_event_progress!(RecordingProgress, IndexBuildProgress, Result<()>);
 
