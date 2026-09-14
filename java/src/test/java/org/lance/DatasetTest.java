@@ -138,6 +138,15 @@ public class DatasetTest {
   }
 
   @Test
+  void testWriteDatasetBuilderRejectsNullFileWriteOptions() {
+    NullPointerException error =
+        assertThrows(
+            NullPointerException.class, () -> new WriteDatasetBuilder().fileWriteOptions(null));
+
+    assertEquals("fileWriteOptions must not be null", error.getMessage());
+  }
+
+  @Test
   void testGetLanceFileFormatVersion(@TempDir Path tempDir) {
     try (RootAllocator allocator = new RootAllocator(Long.MAX_VALUE)) {
       // Test default version (V2_2)

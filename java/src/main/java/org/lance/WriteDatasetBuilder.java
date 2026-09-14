@@ -299,7 +299,8 @@ public class WriteDatasetBuilder {
    * @return this builder instance
    */
   public WriteDatasetBuilder fileWriteOptions(FileWriteOptions fileWriteOptions) {
-    this.fileWriteOptions = fileWriteOptions;
+    this.fileWriteOptions =
+        Preconditions.checkNotNull(fileWriteOptions, "fileWriteOptions must not be null");
     return this;
   }
 

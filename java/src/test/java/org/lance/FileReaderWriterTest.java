@@ -216,20 +216,24 @@ public class FileReaderWriterTest {
     String filePath = tempDir.resolve("page_options.lance").toString();
     FileWriteOptions options = FileWriteOptions.builder().maxPageBytes(0).build();
 
-    try (BufferAllocator allocator = new RootAllocator()) {
-      IllegalArgumentException error =
-          Assertions.assertThrows(
-              IllegalArgumentException.class,
-              () ->
-                  LanceFileWriter.open(
-                      filePath,
-                      allocator,
-                      null,
-                      Optional.empty(),
-                      Collections.emptyMap(),
-                      options));
-      assertTrue(error.getMessage().contains("max_page_bytes must be greater than 0, got 0"));
-    }
+    IllegalArgumentException error =
+        Assertions.assertThrows(
+            IllegalArgumentException.class,
+            () -> {
+              try (BufferAllocator allocator = new RootAllocator();
+                  LanceFileWriter writer =
+                      LanceFileWriter.open(
+                          filePath,
+                          allocator,
+                          null,
+                          Optional.empty(),
+                          Collections.emptyMap(),
+                          options);
+                  VectorSchemaRoot batch = createBatch(allocator)) {
+                writer.write(batch);
+              }
+            });
+    assertTrue(error.getMessage().contains("max_page_bytes must be greater than 0, got 0"));
   }
 
   @Test

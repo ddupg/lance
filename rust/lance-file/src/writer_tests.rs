@@ -1159,6 +1159,18 @@ mod tests {
         assert_eq!(total_page_num, 8)
     }
 
+    fn assert_zero_max_page_bytes_error(error: lance_core::Error) {
+        assert!(
+            matches!(error, lance_core::Error::InvalidInput { .. }),
+            "unexpected error: {error:?}"
+        );
+        assert!(
+            error
+                .to_string()
+                .contains("max_page_bytes must be greater than 0, got 0")
+        );
+    }
+
     #[rstest]
     #[case::schema_writer(false)]
     #[case::lazy_writer(true)]
@@ -1172,8 +1184,12 @@ mod tests {
             ..Default::default()
         };
 
-        let result = if lazy {
-            versions::create_lazy_writer(ConcreteFileVersion::V2_0, object_writer, options)
+        let error = if lazy {
+            let mut writer =
+                versions::create_lazy_writer(ConcreteFileVersion::V2_0, object_writer, options)
+                    .unwrap();
+            let batch = arrow_array::record_batch!(("data", UInt64, [1])).unwrap();
+            writer.write_batch(&batch).await.unwrap_err()
         } else {
             let schema = LanceSchema::try_from(&Schema::new(vec![Field::new(
                 "data",
@@ -1182,18 +1198,49 @@ mod tests {
             )]))
             .unwrap();
             versions::create_writer(ConcreteFileVersion::V2_0, object_writer, schema, options)
+                .err()
+                .expect("zero max_page_bytes should fail")
         };
 
-        let error = result.err().expect("zero max_page_bytes should fail");
-        assert!(
-            matches!(error, lance_core::Error::InvalidInput { .. }),
-            "unexpected error: {error:?}"
-        );
-        assert!(
-            error
-                .to_string()
-                .contains("max_page_bytes must be greater than 0, got 0")
-        );
+        assert_zero_max_page_bytes_error(error);
+    }
+
+    #[tokio::test]
+    async fn test_v2_0_writer_rejects_zero_max_page_bytes() {
+        let path = TempObjFile::default();
+        let object_store = ObjectStore::local();
+        let object_writer = object_store.create(&path).await.unwrap();
+        let schema = LanceSchema::try_from(&Schema::new(vec![Field::new(
+            "data",
+            DataType::UInt64,
+            false,
+        )]))
+        .unwrap();
+        let options = FileWriterOptions {
+            max_page_bytes: Some(0),
+            ..Default::default()
+        };
+
+        let error = versions::v2_0::create_writer(object_writer, schema, options)
+            .err()
+            .expect("zero max_page_bytes should fail");
+        assert_zero_max_page_bytes_error(error);
+    }
+
+    #[tokio::test]
+    async fn test_v2_1_lazy_writer_rejects_zero_max_page_bytes() {
+        let path = TempObjFile::default();
+        let object_store = ObjectStore::local();
+        let object_writer = object_store.create(&path).await.unwrap();
+        let options = FileWriterOptions {
+            max_page_bytes: Some(0),
+            ..Default::default()
+        };
+        let batch = arrow_array::record_batch!(("data", UInt64, [1])).unwrap();
+
+        let mut writer = versions::v2_1::create_lazy_writer(object_writer, options);
+        let error = writer.write_batch(&batch).await.unwrap_err();
+        assert_zero_max_page_bytes_error(error);
     }
 
     #[tokio::test(flavor = "current_thread")]
