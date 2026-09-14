@@ -3233,6 +3233,47 @@ class LanceDataset(pa.dataset.Dataset):
         """
         self._ds.restore()
 
+    def base_paths(self) -> Dict[int, DatasetBasePath]:
+        """Return the base paths registered in the current dataset snapshot.
+
+        The returned dictionary maps each base path ID to an independent
+        :class:`DatasetBasePath` object. It includes registered bases that are not
+        referenced by any data files. The primary dataset storage is not added to
+        the result unless it was explicitly registered as a base path.
+
+        This method does not refresh the dataset to the latest version. Modifying
+        the returned dictionary does not modify the dataset, and previously
+        returned values do not change when the dataset is updated or checked out
+        at another version. The dictionary iteration order is unspecified.
+
+        Returns
+        -------
+        Dict[int, DatasetBasePath]
+            Registered base paths keyed by base path ID. Each value exposes
+            ``id``, ``name``, ``path``, and ``is_dataset_root`` as read-only
+            attributes. ``is_dataset_root`` describes the base's path layout; it
+            does not identify the dataset's current primary storage. Runtime
+            storage options are not included.
+
+        Examples
+        --------
+        >>> import lance
+        >>> import pyarrow as pa
+        >>> dataset = lance.write_dataset(
+        ...     pa.table({"x": [1]}),
+        ...     "memory://base-paths-example",
+        ...     initial_bases=[
+        ...         lance.DatasetBasePath(
+        ...             "memory://base-paths-data", name="data"
+        ...         )
+        ...     ],
+        ... )
+        >>> base_paths = dataset.base_paths()
+        >>> all(base_id == base.id for base_id, base in base_paths.items())
+        True
+        """
+        return self._ds.base_paths()
+
     def add_bases(
         self, new_bases: list, transaction_properties: Optional[Dict[str, str]] = None
     ):
