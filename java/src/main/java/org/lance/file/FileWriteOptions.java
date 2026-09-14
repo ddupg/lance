@@ -19,6 +19,8 @@ import java.util.Optional;
  * Options for configuring a current-format Lance file writer.
  *
  * <p>These options are ignored for legacy V1 files.
+ *
+ * <p>Unset values use the native writer defaults.
  */
 public class FileWriteOptions {
   private final Optional<Long> dataCacheBytes;
