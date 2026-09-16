@@ -3557,13 +3557,29 @@ impl Scanner {
         let result_format = self.index_expr_result_format();
         let index_input = match self.external_row_mask.as_deref() {
             Some(mask) if use_external_mask => Some(self.mask_as_take_input(mask.clone())?),
-            _ => filter_plan.index_query.clone().map(|index_query| {
-                Arc::new(ScalarIndexExec::new(
-                    self.dataset.clone(),
-                    index_query,
-                    result_format,
-                )) as Arc<dyn ExecutionPlan>
-            }),
+            _ => {
+                if let Some(index_query) = filter_plan.index_query.clone() {
+                    let target_fragments = read_options
+                        .fragments
+                        .as_ref()
+                        .unwrap_or_else(|| self.dataset.fragments())
+                        .iter()
+                        .map(|fragment| fragment.id as u32)
+                        .collect::<RoaringBitmap>();
+                    let fragment_scope = ScalarIndexExec::fragments_covered_by_index_query(
+                        &index_query,
+                        self.dataset.as_ref(),
+                    )
+                    .await?
+                        & target_fragments;
+                    Some(Arc::new(
+                        ScalarIndexExec::new(self.dataset.clone(), index_query, result_format)
+                            .with_fragment_scope(fragment_scope),
+                    ) as Arc<dyn ExecutionPlan>)
+                } else {
+                    None
+                }
+            }
         };
 
         let plan: Arc<dyn ExecutionPlan> = Arc::new(FilteredReadExec::try_new(
@@ -6977,7 +6993,7 @@ impl Scanner {
         // are not in the fragments we are scanning.
         if filter_plan.is_exact_index_search() && self.fragments.is_none() {
             let index_query = filter_plan.index_query.as_ref().expect_ok()?;
-            let (_, missing_frags, stale_rows) = self
+            let (relevant_frags, missing_frags, stale_rows) = self
                 .partition_frags_by_coverage(index_query, fragments.clone())
                 .await?;
 
@@ -6992,9 +7008,17 @@ impl Scanner {
                 // 2. The index search is an exact search with no recheck or refine
                 // 3. The indices cover at least the same fragments as the vector index,
                 //    unless fast_search allows skipping uncovered fragments.
-                return Ok(PreFilterSource::ScalarIndexQuery(Arc::new(
-                    ScalarIndexExec::new(self.dataset.clone(), index_query.clone(), result_format),
-                )));
+                let mut exec =
+                    ScalarIndexExec::new(self.dataset.clone(), index_query.clone(), result_format);
+                if missing_frags.is_empty() && !relevant_frags.is_empty() {
+                    exec = exec.with_fragment_scope(
+                        relevant_frags
+                            .iter()
+                            .map(|fragment| fragment.id as u32)
+                            .collect(),
+                    );
+                }
+                return Ok(PreFilterSource::ScalarIndexQuery(Arc::new(exec)));
             } else {
                 log::trace!("exact index search did not cover all fragments");
             }
@@ -7501,6 +7525,25 @@ pub mod test_dataset {
                     &ScalarIndexParams::default(),
                     true,
                 )
+                .await?;
+            Ok(())
+        }
+
+        pub async fn make_segmented_scalar_index(&mut self) -> Result<()> {
+            let params = ScalarIndexParams::default();
+            let mut segments = Vec::with_capacity(self.dataset.get_fragments().len());
+            for fragment in self.dataset.get_fragments() {
+                segments.push(
+                    self.dataset
+                        .create_index_builder(&["i"], IndexType::BTree, &params)
+                        .name("i_idx".to_string())
+                        .fragments(vec![fragment.id() as u32])
+                        .execute_uncommitted()
+                        .await?,
+                );
+            }
+            self.dataset
+                .commit_existing_index_segments("i_idx", "i", segments)
                 .await?;
             Ok(())
         }
@@ -17731,6 +17774,154 @@ full_filter=name LIKE Utf8(\"test%2\"), refine_filter=name LIKE Utf8(\"test%2\")
             filtered_plan.contains("ANNSubIndex: name=idx, k=420, deltas=1, metric=L2"),
             "expected one ANN delta with fragment filter, plan was:\n{filtered_plan}"
         );
+    }
+
+    #[rstest]
+    #[tokio::test]
+    async fn test_vector_prefilter_prunes_scalar_segments(
+        #[values(false, true)] stable_row_ids: bool,
+        #[values(false, true)] explicit_fragments: bool,
+    ) {
+        let mut test_ds = TestVectorDataset::new(LanceFileVersion::Stable, stable_row_ids)
+            .await
+            .unwrap();
+        let vector_segments = test_ds.make_segmented_vector_index().await.unwrap();
+        test_ds.make_segmented_scalar_index().await.unwrap();
+        let fragments = test_ds.dataset.fragments();
+        let query: Float32Array = (0..32).map(|value| value as f32).collect();
+
+        let mut scanner = test_ds.dataset.scan();
+        scanner.project(&["i"]).unwrap();
+        scanner
+            .nearest("vec", &query, 200)
+            .unwrap()
+            .nprobes(2)
+            .prefilter(true)
+            .with_index_segments(vec![vector_segments[1]])
+            .unwrap();
+        if explicit_fragments {
+            scanner.with_fragments(vec![fragments[1].clone()]);
+        }
+        scanner.filter("NOT (i < 250)").unwrap();
+
+        let analyzed = scanner.analyze_plan().await.unwrap();
+        let scalar_index_node = analyzed
+            .lines()
+            .find(|line| line.trim_start().starts_with("ScalarIndexQuery:"))
+            .unwrap_or_else(|| panic!("expected a scalar index query, plan was:\n{analyzed}"));
+        assert!(
+            scalar_index_node.contains("indices_loaded=1,"),
+            "expected one scalar segment to be loaded, plan was:\n{analyzed}"
+        );
+        if explicit_fragments {
+            assert!(
+                analyzed.contains("projection=[], num_fragments=1"),
+                "segment pruning must preserve the FilteredRead row-ID path, plan was:\n{analyzed}"
+            );
+        }
+
+        let actual = scanner.try_into_batch().await.unwrap();
+        let actual = actual["i"]
+            .as_primitive::<Int32Type>()
+            .values()
+            .iter()
+            .copied()
+            .collect::<BTreeSet<_>>();
+
+        let mut oracle = test_ds.dataset.scan();
+        oracle.project(&["i"]).unwrap();
+        oracle
+            .nearest("vec", &query, 200)
+            .unwrap()
+            .nprobes(2)
+            .prefilter(true)
+            .use_index(false)
+            .use_scalar_index(false)
+            .with_fragments(vec![fragments[1].clone()]);
+        oracle.filter("NOT (i < 250)").unwrap();
+        let expected = oracle.try_into_batch().await.unwrap();
+        let expected = expected["i"]
+            .as_primitive::<Int32Type>()
+            .values()
+            .iter()
+            .copied()
+            .collect::<BTreeSet<_>>();
+
+        assert_eq!(actual, expected);
+        assert!(!expected.is_empty());
+        let recall = actual.intersection(&expected).count() as f64 / expected.len() as f64;
+        assert_eq!(recall, 1.0);
+    }
+
+    #[rstest]
+    #[case::plain_all(false, false)]
+    #[case::plain_fragment(false, true)]
+    #[case::fts_fragment(true, true)]
+    #[tokio::test]
+    async fn test_filtered_read_prunes_scalar_segments(
+        #[values(false, true)] stable_row_ids: bool,
+        #[case] full_text_search: bool,
+        #[case] explicit_fragments: bool,
+    ) {
+        let mut test_ds = TestVectorDataset::new(LanceFileVersion::Stable, stable_row_ids)
+            .await
+            .unwrap();
+        test_ds.make_segmented_scalar_index().await.unwrap();
+        if full_text_search {
+            test_ds.make_fts_index().await.unwrap();
+        }
+        let fragments = test_ds.dataset.fragments();
+        let mut scanner = test_ds.dataset.scan();
+        scanner.project(&["i"]).unwrap();
+        scanner.filter("NOT (i < 150)").unwrap();
+        if explicit_fragments {
+            scanner.with_fragments(vec![fragments[1].clone()]);
+        }
+        if full_text_search {
+            // Every fixture row contains the token "s", so the scalar-only scan is an oracle.
+            scanner
+                .full_text_search(FullTextSearchQuery::new("s".to_owned()))
+                .unwrap()
+                .prefilter(true);
+        }
+        let analyzed = scanner.analyze_plan().await.unwrap();
+        let scalar_index_node = analyzed
+            .lines()
+            .find(|line| line.trim_start().starts_with("ScalarIndexQuery:"))
+            .unwrap_or_else(|| panic!("expected a scalar index query, plan was:\n{analyzed}"));
+        let expected_segments = if explicit_fragments {
+            1
+        } else {
+            fragments.len()
+        };
+        assert!(
+            scalar_index_node.contains(&format!("indices_loaded={expected_segments},")),
+            "unexpected scalar segment count, plan was:\n{analyzed}"
+        );
+        let actual = scanner.try_into_batch().await.unwrap();
+        let actual = actual["i"]
+            .as_primitive::<Int32Type>()
+            .values()
+            .iter()
+            .copied()
+            .collect::<BTreeSet<_>>();
+
+        let mut oracle = test_ds.dataset.scan();
+        oracle.project(&["i"]).unwrap();
+        oracle.filter("NOT (i < 150)").unwrap();
+        oracle.use_scalar_index(false);
+        if explicit_fragments {
+            oracle.with_fragments(vec![fragments[1].clone()]);
+        }
+        let expected = oracle.try_into_batch().await.unwrap();
+        let expected = expected["i"]
+            .as_primitive::<Int32Type>()
+            .values()
+            .iter()
+            .copied()
+            .collect::<BTreeSet<_>>();
+        assert!(!expected.is_empty());
+        assert_eq!(actual, expected);
     }
 
     #[tokio::test]
