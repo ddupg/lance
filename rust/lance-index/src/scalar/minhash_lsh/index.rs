@@ -189,7 +189,10 @@ pub struct MinHashLshIndex {
     /// buckets not yet walked to their end.
     pub(super) window_pages: usize,
     cache: WeakLanceCache,
+    /// Legacy and tagged remappers are mutually exclusive. With neither,
+    /// the signature table already holds addresses in the current domain.
     frag_reuse_index: Option<Arc<dyn RowIdRemapper>>,
+    batch_remapper: Option<Arc<dyn BatchRowIdRemapper>>,
 }
 
 impl std::fmt::Debug for MinHashLshIndex {
@@ -258,6 +261,16 @@ impl MinHashLshIndex {
         store: Arc<dyn IndexStore>,
         details: &prost_types::Any,
         frag_reuse_index: Option<Arc<dyn RowIdRemapper>>,
+        cache: &LanceCache,
+    ) -> Result<Arc<Self>> {
+        Self::load_with_remappers(store, details, frag_reuse_index, None, cache).await
+    }
+
+    pub(super) async fn load_with_remappers(
+        store: Arc<dyn IndexStore>,
+        details: &prost_types::Any,
+        frag_reuse_index: Option<Arc<dyn RowIdRemapper>>,
+        batch_remapper: Option<Arc<dyn BatchRowIdRemapper>>,
         cache: &LanceCache,
     ) -> Result<Arc<Self>> {
         let params = MinHashLshIndexParams::from_details_any(details)?;
@@ -334,6 +347,7 @@ impl MinHashLshIndex {
             window_pages: (rows_per_batch(BAND_ROW_BYTES) / page_rows).max(1),
             cache: WeakLanceCache::from(cache),
             frag_reuse_index,
+            batch_remapper,
         }))
     }
 
@@ -374,32 +388,39 @@ impl MinHashLshIndex {
         mask: Arc<RowAddrMask>,
     ) -> Pin<Box<dyn Stream<Item = Result<RecordBatch>> + Send>> {
         let num_hashes = self.params.num_hashes as usize;
-        let remapper = self.frag_reuse_index.clone();
+        let frag_reuse_index = self.frag_reuse_index.clone();
+        let batch_remapper = self.batch_remapper.clone();
         scan_rows(
             self.signatures.clone(),
             0,
             self.num_docs,
             rows_per_batch(signature_row_bytes(num_hashes)),
         )
-        .map(move |batch| {
-            let batch = batch?;
-            let (stored_ids, _) = signature_columns(&batch, num_hashes)?;
-            let mut row_ids = Vec::with_capacity(batch.num_rows());
-            let selected = BooleanArray::from_iter(stored_ids.values().iter().map(|&stored| {
-                let row_id = match remapper.as_deref() {
-                    Some(remapper) => remapper.remap_row_id(stored),
-                    None => Some(stored),
-                };
-                let keep = row_id.filter(|&row_id| mask.selected(row_id));
-                if let Some(row_id) = keep {
-                    row_ids.push(row_id);
-                }
-                Some(keep.is_some())
-            }));
-            let filtered = filter_record_batch(&batch, &selected)?;
-            let mut columns = filtered.columns().to_vec();
-            columns[filtered.schema().index_of(ROW_ID)?] = Arc::new(UInt64Array::from(row_ids));
-            Ok(RecordBatch::try_new(filtered.schema(), columns)?)
+        .and_then(move |batch| {
+            let frag_reuse_index = frag_reuse_index.clone();
+            let batch_remapper = batch_remapper.clone();
+            let mask = mask.clone();
+            async move {
+                let (stored_ids, _) = signature_columns(&batch, num_hashes)?;
+                let mapped = remap_signature_row_ids(
+                    frag_reuse_index.as_deref(),
+                    batch_remapper.as_deref(),
+                    stored_ids.values().iter().copied(),
+                )
+                .await?;
+                let mut row_ids = Vec::with_capacity(batch.num_rows());
+                let selected = BooleanArray::from_iter(mapped.map(|row_id| {
+                    let keep = row_id.filter(|&row_id| mask.selected(row_id));
+                    if let Some(row_id) = keep {
+                        row_ids.push(row_id);
+                    }
+                    Some(keep.is_some())
+                }));
+                let filtered = filter_record_batch(&batch, &selected)?;
+                let mut columns = filtered.columns().to_vec();
+                columns[filtered.schema().index_of(ROW_ID)?] = Arc::new(UInt64Array::from(row_ids));
+                Ok(RecordBatch::try_new(filtered.schema(), columns)?)
+            }
         })
         .boxed()
     }
@@ -409,6 +430,7 @@ impl MinHashLshIndex {
             reader: self.signatures.clone(),
             num_docs: self.num_docs,
             frag_reuse_index: self.frag_reuse_index.clone(),
+            batch_remapper: self.batch_remapper.clone(),
             transform,
         }
     }
@@ -801,7 +823,6 @@ impl MinHashLshIndex {
             hits: TopHits::new(limit),
             query,
             mask,
-            remapper: self.frag_reuse_index.as_deref(),
         };
         let mut levels = CandidateLevels::new(num_bands, cap);
         let missing = scorer.hits.missing();
@@ -971,16 +992,23 @@ impl MinHashLshIndex {
             metrics.record_index_cache_hit();
             let (row_ids, signatures) = signature_columns(&resident.batch, num_hashes)?;
             let first_doc = chunk * chunk_docs;
-            for &doc_id in group {
-                let offset = doc_id as usize - first_doc;
-                let Some(row_id) = row_ids.values().get(offset) else {
-                    return Err(Error::corrupt_file_named(
-                        SIGNATURES_FILENAME,
-                        format!("resident signature chunk {chunk} has no doc {doc_id}"),
-                    ));
-                };
+            let last_doc = group[group.len() - 1];
+            if last_doc as usize - first_doc >= row_ids.len() {
+                return Err(Error::corrupt_file_named(
+                    SIGNATURES_FILENAME,
+                    format!("resident signature chunk {chunk} has no doc {last_doc}"),
+                ));
+            }
+            let offsets = group.iter().map(|&doc_id| doc_id as usize - first_doc);
+            let mapped = remap_signature_row_ids(
+                self.frag_reuse_index.as_deref(),
+                self.batch_remapper.as_deref(),
+                offsets.clone().map(|offset| row_ids.value(offset)),
+            )
+            .await?;
+            for (offset, row_id) in offsets.zip(mapped) {
                 scorer.score(
-                    *row_id,
+                    row_id,
                     &signatures[offset * num_hashes..(offset + 1) * num_hashes],
                 );
             }
@@ -1008,12 +1036,14 @@ impl MinHashLshIndex {
             ));
         }
         let (row_ids, signatures) = signature_columns(&batch, num_hashes)?;
-        for (row_id, signature) in row_ids
-            .values()
-            .iter()
-            .zip(signatures.chunks_exact(num_hashes))
-        {
-            scorer.score(*row_id, signature);
+        let mapped = remap_signature_row_ids(
+            self.frag_reuse_index.as_deref(),
+            self.batch_remapper.as_deref(),
+            row_ids.values().iter().copied(),
+        )
+        .await?;
+        for (row_id, signature) in mapped.zip(signatures.chunks_exact(num_hashes)) {
+            scorer.score(row_id, signature);
         }
         Ok(())
     }
@@ -1050,11 +1080,20 @@ impl MinHashLshIndex {
         while let Some(batch) = stream.try_next().await? {
             let end_row = first_row + batch.num_rows();
             let (row_ids, signatures) = signature_columns(&batch, num_hashes)?;
+            let mut mapped = remap_signature_row_ids(
+                self.frag_reuse_index.as_deref(),
+                self.batch_remapper.as_deref(),
+                row_ids.values().iter().copied(),
+            )
+            .await?;
+            let mut next_offset = 0;
             let mut scored = 0;
             while (pending as usize) < end_row {
                 let offset = pending as usize - first_row;
+                let row_id = mapped.nth(offset - next_offset).flatten();
+                next_offset = offset + 1;
                 scorer.score(
-                    row_ids.value(offset),
+                    row_id,
                     &signatures[offset * num_hashes..(offset + 1) * num_hashes],
                 );
                 scored += 1;
@@ -1376,21 +1415,13 @@ struct Scorer<'a> {
     hits: TopHits,
     query: &'a [SignatureValue],
     mask: &'a RowAddrMask,
-    remapper: Option<&'a dyn RowIdRemapper>,
 }
 
 impl Scorer<'_> {
-    fn score(&mut self, row_id: u64, signature: &[SignatureValue]) {
-        let row_id = match self.remapper {
-            Some(remapper) => match remapper.remap_row_id(row_id) {
-                Some(row_id) => row_id,
-                None => return,
-            },
-            None => row_id,
-        };
-        if !self.mask.selected(row_id) {
+    fn score(&mut self, row_id: Option<u64>, signature: &[SignatureValue]) {
+        let Some(row_id) = row_id.filter(|&row_id| self.mask.selected(row_id)) else {
             return;
-        }
+        };
         self.hits.push(MinHashHit {
             row_id,
             distance: OrderedFloat(1.0 - estimate_jaccard(self.query, signature)),

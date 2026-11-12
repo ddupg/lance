@@ -112,3 +112,13 @@ impl RowIdRemapper for CompactedToFragmentOne {
         Ok(RecordBatch::try_new(batch.schema(), columns)?)
     }
 }
+
+#[async_trait::async_trait]
+impl lance_index_core::remapping::BatchRowIdRemapper for CompactedToFragmentOne {
+    async fn remap_row_ids(&self, row_ids: &[u64]) -> Result<Vec<Option<u64>>> {
+        Ok(row_ids
+            .iter()
+            .map(|&row_id| self.remap_row_id(row_id))
+            .collect())
+    }
+}

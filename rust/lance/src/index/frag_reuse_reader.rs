@@ -9,6 +9,7 @@ use lance_core::{Error, Result};
 use lance_table::format::IndexMetadata;
 use lance_table::system_index::frag_reuse::ledger::FragReuseLedger;
 use roaring::RoaringBitmap;
+use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
@@ -143,10 +144,35 @@ pub(super) async fn segment_supports_batch_remapping(
             super::frag_reuse_remapping::inverted_supports_batch_remapping(dataset, index).await?,
         ));
     }
-    Ok(super::scalar::SCALAR_INDEX_PLUGIN_REGISTRY
-        .get_plugin_by_details(details)
-        .ok()
-        .map(|plugin| plugin.supports_batch_row_id_remapping()))
+    // JSON forwards loading to its target. A wrapper's forwarding entry point
+    // alone cannot establish that every possible target can translate addresses.
+    let mut details = Cow::Borrowed(details.as_ref());
+    loop {
+        let Ok(plugin) =
+            super::scalar::SCALAR_INDEX_PLUGIN_REGISTRY.get_plugin_by_details(&details)
+        else {
+            return Ok(None);
+        };
+        if !plugin.name().eq_ignore_ascii_case("json") {
+            return Ok(Some(plugin.supports_batch_row_id_remapping()));
+        }
+        let Ok(json) = details.to_msg::<lance_index::pb::JsonIndexDetails>() else {
+            return Ok(None);
+        };
+        let Some(target) = json.target_details else {
+            return Ok(None);
+        };
+        // Current JSON writers record the target's version. Keep older wrappers
+        // on their existing read path rather than guessing a domain for translation.
+        if json.target_index_version.is_none() {
+            return Ok(Some(false));
+        }
+        // JSON-wrapped FTS is not routable and current writers reject it.
+        if target.type_url.ends_with("InvertedIndexDetails") {
+            return Ok(Some(false));
+        }
+        details = Cow::Owned(target);
+    }
 }
 
 /// One segment's derived query-time inputs from the coverage backtrack.

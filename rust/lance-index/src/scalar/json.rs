@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: Copyright The Lance Authors
 
 use lance_core::utils::row_addr_remap::RowAddrRemap;
-use lance_index_core::remapping::RowAddrTranslator;
+use lance_index_core::remapping::{BatchRowIdRemapper, RowAddrTranslator};
 use std::{
     ops::Bound,
     sync::{Arc, Mutex},
@@ -1518,6 +1518,48 @@ impl ScalarIndexPlugin for JsonIndexPlugin {
             .await?;
         let mut index = JsonIndex::new(target_index, json_details.path)
             .with_target_data_type(json_details.target_data_type);
+        index.target_plugin_name = Some(target_plugin.name().to_string());
+        Ok(Arc::new(index))
+    }
+
+    fn supports_batch_row_id_remapping(&self) -> bool {
+        // The wrapper forwards translation; segment eligibility also checks its target.
+        true
+    }
+
+    async fn load_index_with_remapping(
+        &self,
+        index_store: Arc<dyn IndexStore>,
+        index_details: &prost_types::Any,
+        index_version: u32,
+        remapping: Option<Arc<dyn BatchRowIdRemapper>>,
+        cache: &LanceCache,
+    ) -> Result<Arc<dyn ScalarIndex>> {
+        if remapping.is_none() {
+            return self
+                .load_index(index_store, index_details, index_version, None, cache)
+                .await;
+        }
+        let registry = self.registry()?;
+        let details = crate::pb::JsonIndexDetails::decode(index_details.value.as_slice())?;
+        let target_details = details.target_details.as_ref().expect_ok()?;
+        let target_plugin = registry.get_plugin_by_details(target_details)?;
+        let target_version = details.target_index_version.ok_or_else(|| {
+            Error::not_supported(
+                "asynchronous row-ID remapping requires JSON target_index_version metadata",
+            )
+        })?;
+        let target = target_plugin
+            .load_index_with_remapping(
+                index_store,
+                target_details,
+                target_version,
+                remapping,
+                &cache.with_key_prefix("json_target"),
+            )
+            .await?;
+        let mut index =
+            JsonIndex::new(target, details.path).with_target_data_type(details.target_data_type);
         index.target_plugin_name = Some(target_plugin.name().to_string());
         Ok(Arc::new(index))
     }
@@ -3312,13 +3354,36 @@ mod tests {
         details.target_index_version = None;
         let legacy_details = prost_types::Any::from_msg(&details).unwrap();
 
-        let index = load_json_index(store, &legacy_details).await;
+        let index = load_json_index(store.clone(), &legacy_details).await;
         let json_index = index.as_any().downcast_ref::<JsonIndex>().unwrap();
         assert!(
             !json_index.target_index.results_are_row_addresses(),
             "a JSON-wrapped {target_index_type} target with no recorded target_index_version \
              must load at its row-id-domain floor version, not its plugin's current \
              (address-domain) max version"
+        );
+        let registry = IndexPluginRegistry::with_default_plugins();
+        let error = registry
+            .get_plugin_by_name("json")
+            .unwrap()
+            .load_index_with_remapping(
+                store,
+                &legacy_details,
+                JSON_ROW_ID_DOMAIN_VERSION,
+                Some(Arc::new(
+                    crate::scalar::lookup_test_util::CompactedToFragmentOne {
+                        deleted: Default::default(),
+                    },
+                )),
+                &LanceCache::no_cache(),
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(error, Error::NotSupported { .. }));
+        assert!(
+            error
+                .to_string()
+                .contains("requires JSON target_index_version")
         );
     }
 
@@ -3338,6 +3403,7 @@ mod tests {
         #[case] expected_ordering: TrainingOrdering,
         #[case] json_docs: &[&str],
         #[case] address_domain: bool,
+        #[values(false, true)] batch_remapping: bool,
     ) {
         let (store, _tmpdir) = local_json_index_store();
         let created = train_json_index(
@@ -3361,8 +3427,33 @@ mod tests {
                 .is_some()
         );
 
-        let index = load_json_index(store, &created.index_details).await;
+        let index = if batch_remapping {
+            let registry = IndexPluginRegistry::with_default_plugins();
+            registry
+                .get_plugin_by_name("json")
+                .unwrap()
+                .load_index_with_remapping(
+                    store,
+                    &created.index_details,
+                    // The target's version must not be inferred from the wrapper.
+                    JSON_ROW_ID_DOMAIN_VERSION,
+                    Some(Arc::new(
+                        crate::scalar::lookup_test_util::CompactedToFragmentOne {
+                            deleted: Default::default(),
+                        },
+                    )),
+                    &LanceCache::no_cache(),
+                )
+                .await
+                .unwrap()
+        } else {
+            load_json_index(store, &created.index_details).await
+        };
         let json_index = index.as_any().downcast_ref::<JsonIndex>().unwrap();
+        assert_eq!(
+            json_index.recorded_target_data_type,
+            decode_details(&created.index_details).target_data_type
+        );
         assert_eq!(
             json_index.target_index.results_are_row_addresses(),
             address_domain

@@ -85,25 +85,9 @@ pub(super) enum RowIdTransform<'a> {
 }
 
 impl RowIdTransform<'_> {
-    /// The row id each input row keeps, or `None` for rows to drop.
-    ///
-    /// Stored row ids predate any deferred compaction the segment was opened
-    /// with, so `frag_reuse_index` first brings them into the current address
-    /// space, which is the space the filter or mapping is expressed in. A
-    /// remap translates one batch at a time through the translator.
-    async fn apply(
-        &self,
-        row_ids: &UInt64Array,
-        frag_reuse_index: Option<&dyn RowIdRemapper>,
-    ) -> Result<Vec<Option<u64>>> {
-        let mut row_ids: Vec<Option<u64>> = row_ids
-            .values()
-            .iter()
-            .map(|&row_id| match frag_reuse_index {
-                Some(remapper) => remapper.remap_row_id(row_id),
-                None => Some(row_id),
-            })
-            .collect();
+    /// Apply the filter or rewrite to addresses in the current domain,
+    /// preserving deleted positions as `None`.
+    async fn apply(&self, mut row_ids: Vec<Option<u64>>) -> Result<Vec<Option<u64>>> {
         match self {
             Self::Keep => {}
             Self::Filter(filter) => {
@@ -129,9 +113,8 @@ impl RowIdTransform<'_> {
 pub(super) struct SignatureSource<'a> {
     pub reader: Arc<dyn IndexReader>,
     pub num_docs: usize,
-    /// The deferred compactions the segment was opened with; see
-    /// [`RowIdTransform::apply`].
     pub frag_reuse_index: Option<Arc<dyn RowIdRemapper>>,
+    pub batch_remapper: Option<Arc<dyn BatchRowIdRemapper>>,
     pub transform: RowIdTransform<'a>,
 }
 
@@ -148,16 +131,22 @@ impl SignatureSource<'_> {
         );
         let transform = &self.transform;
         let frag_reuse_index = self.frag_reuse_index.as_deref();
+        let batch_remapper = self.batch_remapper.as_deref();
         let stream = batches
             .map(move |batch| {
                 let generator = generator.clone();
                 async move {
                     let batch = batch?;
-                    // Row id filtering needs the transform, which cannot move
-                    // into the CPU task, so it runs here, one batch at a time;
-                    // band keys are computed there.
+                    // Filters and rewrites use current addresses. Resolve
+                    // deferred compaction before the CPU task computes band keys.
                     let (row_ids, _) = signature_columns(&batch, num_hashes)?;
-                    let kept = transform.apply(row_ids, frag_reuse_index).await?;
+                    let mapped = remap_signature_row_ids(
+                        frag_reuse_index,
+                        batch_remapper,
+                        row_ids.values().iter().copied(),
+                    )
+                    .await?;
+                    let kept = transform.apply(mapped.collect()).await?;
                     spawn_cpu(move || resign_batch(generator, batch, kept)).await
                 }
             })

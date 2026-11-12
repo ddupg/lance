@@ -72,6 +72,7 @@ use bytes::Bytes;
 use datafusion_execution::SendableRecordBatchStream;
 use futures::stream::FuturesOrdered;
 use futures::{Stream, StreamExt, TryStreamExt};
+use itertools::Either;
 use lance_core::cache::{CacheKey, CacheKeySchema, KeyBuilder, LanceCache, WeakLanceCache};
 use lance_core::datatypes::SchemaCompareOptions;
 use lance_core::deepsize::DeepSizeOf;
@@ -81,6 +82,7 @@ use lance_core::{Error, ROW_ID, Result};
 use lance_encoding::constants::{
     COMPRESSION_META_KEY, STRUCTURAL_ENCODING_FULLZIP, STRUCTURAL_ENCODING_META_KEY,
 };
+use lance_index_core::remapping::{BatchRowIdRemapper, remap_row_ids_async};
 use lance_select::RowAddrMask;
 use lance_tokenizer::TokenStream;
 use prost::Message;
@@ -104,6 +106,24 @@ use crate::scalar::{
 use crate::vector::graph::OrderedFloat;
 use crate::{Index, IndexType};
 use crate::{pb, pbold};
+
+/// Translate a bounded set of stored addresses without changing signature offsets.
+/// The legacy and identity paths can translate lazily without allocating.
+async fn remap_signature_row_ids<'a>(
+    frag_reuse_index: Option<&'a dyn RowIdRemapper>,
+    batch_remapper: Option<&'a dyn BatchRowIdRemapper>,
+    row_ids: impl Iterator<Item = u64> + Send + 'a,
+) -> Result<impl Iterator<Item = Option<u64>> + 'a> {
+    Ok(if let Some(remapper) = batch_remapper {
+        let row_ids: Vec<_> = row_ids.collect();
+        Either::Left(remap_row_ids_async(remapper, &row_ids).await?.into_iter())
+    } else {
+        Either::Right(row_ids.map(move |row_id| match frag_reuse_index {
+            Some(remapper) => remapper.remap_row_id(row_id),
+            None => Some(row_id),
+        }))
+    })
+}
 
 /// On-disk format version of the index files. The format is unstable; bump
 /// on any layout change instead of adding compatibility paths.
@@ -883,6 +903,30 @@ impl ScalarIndexPlugin for MinHashLshIndexPlugin {
         Ok(
             MinHashLshIndex::load(index_store, index_details, frag_reuse_index, cache).await?
                 as Arc<dyn ScalarIndex>,
+        )
+    }
+
+    fn supports_batch_row_id_remapping(&self) -> bool {
+        true
+    }
+
+    async fn load_index_with_remapping(
+        &self,
+        index_store: Arc<dyn IndexStore>,
+        index_details: &prost_types::Any,
+        _index_version: u32,
+        remapping: Option<Arc<dyn BatchRowIdRemapper>>,
+        cache: &LanceCache,
+    ) -> Result<Arc<dyn ScalarIndex>> {
+        Ok(
+            MinHashLshIndex::load_with_remappers(
+                index_store,
+                index_details,
+                None,
+                remapping,
+                cache,
+            )
+            .await?,
         )
     }
 

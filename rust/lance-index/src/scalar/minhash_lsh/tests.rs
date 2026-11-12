@@ -736,8 +736,19 @@ impl RowIdRemapper for TestRemapper {
     }
 }
 
+#[async_trait]
+impl BatchRowIdRemapper for TestRemapper {
+    async fn remap_row_ids(&self, row_ids: &[u64]) -> Result<Vec<Option<u64>>> {
+        tokio::task::yield_now().await;
+        Ok(row_ids.iter().map(|&id| self.remap_row_id(id)).collect())
+    }
+}
+
+#[rstest]
+#[case::legacy(false)]
+#[case::tagged(true)]
 #[tokio::test]
-async fn test_rebuilds_remap_rows_of_a_deferred_compaction() {
+async fn test_rebuilds_remap_rows_of_a_deferred_compaction(#[case] tagged: bool) {
     // The segment stores fragment 0 addresses; a deferred compaction moved
     // its rows to fragment 1 and deleted row 2. Filters are expressed in
     // the compacted address space, so a rebuild applying them to the
@@ -753,10 +764,12 @@ async fn test_rebuilds_remap_rows_of_a_deferred_compaction() {
         (2u64, None),
         (3u64, Some(compacted(3))),
     ]));
-    let index = MinHashLshIndex::load(
+    let remapper = Arc::new(remapper);
+    let index = MinHashLshIndex::load_with_remappers(
         store.clone(),
         &MinHashLshIndexParams::default().details_any().unwrap(),
-        Some(Arc::new(remapper)),
+        (!tagged).then(|| remapper.clone() as Arc<dyn RowIdRemapper>),
+        tagged.then_some(remapper as Arc<dyn BatchRowIdRemapper>),
         &LanceCache::no_cache(),
     )
     .await
@@ -951,23 +964,27 @@ async fn search_with(
 }
 
 #[rstest]
-#[case::dense(0)]
-#[case::sparse(3000)]
+#[case::dense(0, false)]
+#[case::sparse(3000, false)]
+#[case::tagged_dense(0, true)]
+#[case::tagged_sparse(120, true)]
 #[tokio::test]
-async fn test_overflowing_lower_level_is_continued(#[case] num_fillers: usize) {
-    // 200 copies of a text (rows 0..200) and 200 copies of a near duplicate
-    // (rows 200..400) sharing some but not all bands with it. Searching the
-    // near duplicate for 250 rows takes its copies, then the 50 lowest rows
-    // of the text, whose level holds only 32 candidates and is walked again
-    // from where it overflowed: against a sequential scan of the signatures
-    // when the level is most of the segment, by scattered reads when filler
-    // texts dilute it below a tenth.
+async fn test_overflowing_lower_level_is_continued(
+    #[case] num_fillers: usize,
+    #[case] tagged: bool,
+) {
+    // Copies of two near duplicates fill distinct candidate levels. Keeping
+    // fewer candidates than copies forces the lower level to resume after
+    // overflow: dense signatures use a sequential scan, sparse ones use
+    // scattered reads. Small tagged fixtures exercise both paths with a deletion.
+    let copies = if tagged { 8 } else { 200 };
+    let requested = copies + copies / 4;
     let (bases, _) = near_duplicate_corpus(1 + num_fillers, 60);
     let mut words: Vec<&str> = bases[0].split(' ').collect();
     words[59] = "zzz";
     let near = words.join(" ");
-    let mut texts = vec![bases[0].as_str(); 200];
-    texts.extend(std::iter::repeat_n(near.as_str(), 200));
+    let mut texts = vec![bases[0].as_str(); copies];
+    texts.extend(std::iter::repeat_n(near.as_str(), copies));
     texts.extend(bases[1..].iter().map(String::as_str));
     let (_tmpdir, store) = test_store();
     let builder = default_builder().with_page_rows(8).unwrap();
@@ -976,16 +993,56 @@ async fn test_overflowing_lower_level_is_continued(#[case] num_fillers: usize) {
         .train(text_stream(&rows_from(&texts), 64), store.as_ref())
         .await
         .unwrap();
-    let bounded = load_bounded(&store, &details, &LanceCache::no_cache(), 32, 128).await;
+    let remapped = |id| if tagged { id + (1u64 << 32) } else { id };
+    let batch_remapper = tagged.then(|| {
+        let mut mapping: HashMap<_, _> = (0..texts.len() as u64)
+            .map(|id| (id, Some(remapped(id))))
+            .collect();
+        mapping.insert(0, None);
+        Arc::new(TestRemapper(mapping)) as Arc<dyn BatchRowIdRemapper>
+    });
+    let mut bounded = MinHashLshIndex::load_with_remappers(
+        store.clone(),
+        &details,
+        None,
+        batch_remapper,
+        &LanceCache::no_cache(),
+    )
+    .await
+    .unwrap();
+    let bounds = Arc::get_mut(&mut bounded).unwrap();
+    bounds.candidate_batch = if tagged { 2 } else { 32 };
+    bounds.window_pages = 128;
     let unbounded = load(&store, &details, &LanceCache::no_cache()).await;
 
-    let hits = ids(&search(&bounded, &near, 250).await);
-    assert_eq!(hits[..200], (200..400).collect::<Vec<u64>>()[..]);
-    assert_eq!(hits[200..], (0..50).collect::<Vec<u64>>()[..]);
-    for limit in [10, 201, 250, 500] {
+    let hits = ids(&search(&bounded, &near, requested).await);
+    assert_eq!(
+        hits[..copies],
+        (copies as u64..2 * copies as u64)
+            .map(remapped)
+            .collect::<Vec<_>>()[..]
+    );
+    let first = u64::from(tagged);
+    assert_eq!(
+        hits[copies..],
+        (first..first + (requested - copies) as u64)
+            .map(remapped)
+            .collect::<Vec<_>>()[..]
+    );
+    for limit in [copies.min(10), copies + 1, requested, copies * 5 / 2] {
+        let expected: Vec<_> = search(&unbounded, &near, limit + usize::from(tagged))
+            .await
+            .into_iter()
+            .filter(|hit| !tagged || hit.row_id != 0)
+            .map(|hit| MinHashHit {
+                row_id: remapped(hit.row_id),
+                ..hit
+            })
+            .take(limit)
+            .collect();
         assert_eq!(
             search(&bounded, &near, limit).await,
-            search(&unbounded, &near, limit).await,
+            expected,
             "limit {limit}"
         );
     }

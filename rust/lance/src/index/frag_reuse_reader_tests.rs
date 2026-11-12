@@ -26,7 +26,9 @@ use lance_index::IndexType;
 use lance_index::frag_reuse::FRAG_REUSE_INDEX_NAME;
 use lance_index::frag_reuse::row_map::ROW_MAP_CACHE_CHUNK_BYTES;
 use lance_index::metrics::NoOpMetricsCollector;
+use lance_index::optimize::OptimizeOptions;
 use lance_index::scalar::ScalarIndexParams;
+use lance_index::scalar::minhash_lsh::{MinHashLshIndexParams, MinHashQuery};
 use lance_table::format::pb;
 use lance_table::format::pb::fragment_reuse_index_details::{
     FragmentDigest, InlineContent, StablePartition, Transition, transition,
@@ -481,10 +483,20 @@ async fn destination_coverage_requires_every_contributing_segment(#[case] scenar
             indices[second].index_version = i32::MAX;
         }
         "plugin" => {
-            // A segment requiring an unsupported consumer must not be opened or
-            // counted toward the logical index's destination coverage.
+            // Historical JSON wrappers without the target version cannot translate
+            // addresses and must not establish destination coverage.
             indices[second].index_details = Some(Arc::new(
-                prost_types::Any::from_msg(&lance_index::pb::FmIndexDetails::default()).unwrap(),
+                prost_types::Any::from_msg(&lance_index::pb::JsonIndexDetails {
+                    path: "v".into(),
+                    target_details: Some(
+                        prost_types::Any::from_msg(
+                            &lance_index::pbold::BTreeIndexDetails::default(),
+                        )
+                        .unwrap(),
+                    ),
+                    ..Default::default()
+                })
+                .unwrap(),
             ));
             assert!(crate::index::segment::index_is_usable(&indices[second]));
         }
@@ -730,6 +742,7 @@ async fn scalar_queries_translate_deleted_sources_and_lazy_blocks(
 
 #[rstest::rstest]
 #[case::ngram(IndexType::NGram)]
+#[case::fm(IndexType::Fm)]
 #[case::inverted(IndexType::Inverted)]
 #[tokio::test]
 async fn text_indices_translate_through_the_shared_remapper(#[case] index_type: IndexType) {
@@ -802,7 +815,10 @@ async fn text_indices_translate_through_the_shared_remapper(#[case] index_type: 
         index.fragment_bitmap.as_ref().unwrap(),
         dataset.fragment_bitmap.as_ref()
     );
-    for _ in 0..2 {
+    for prewarm in [false, true] {
+        if prewarm {
+            dataset.prewarm_index("text_idx").await.unwrap();
+        }
         let mut scan = dataset.scan();
         if index_type == IndexType::Inverted {
             scan.full_text_search(lance_index::scalar::FullTextSearchQuery::new("even".into()))
@@ -823,6 +839,325 @@ async fn text_indices_translate_through_the_shared_remapper(#[case] index_type: 
             .collect::<std::collections::BTreeSet<_>>();
         assert_eq!(actual, std::collections::BTreeSet::from([0, 2, 6]));
     }
+}
+
+#[rstest::rstest]
+#[case::btree("btree", false)]
+#[case::bitmap("bitmap", false)]
+#[case::zonemap("zonemap", false)]
+#[case::bloomfilter("bloomfilter", false)]
+#[case::ngram("ngram", true)]
+#[case::fm("fm", true)]
+#[tokio::test]
+async fn json_tagged_remapping_keeps_target_queries(
+    #[case] target: &str,
+    #[case] text: bool,
+    #[values(false, true)] external: bool,
+) {
+    let docs: Vec<_> = (0..8)
+        .map(|i| match i {
+            4 => r#"{"v":null}"#.to_string(),
+            5 => "{}".to_string(),
+            _ if text => format!(r#"{{"v":"needle{i}"}}"#),
+            _ => format!(r#"{{"v":{i}}}"#),
+        })
+        .collect();
+    let batch = arrow_array::record_batch!(("i", Int32, [0, 1, 2, 3, 4, 5, 6, 7])).unwrap();
+    let json_field =
+        arrow_schema::Field::new("json", arrow_schema::DataType::Utf8, true).with_metadata(
+            std::collections::HashMap::from([("ARROW:extension:name".into(), "arrow.json".into())]),
+        );
+    let batch = RecordBatch::try_new(
+        Arc::new(arrow_schema::Schema::new(vec![
+            batch.schema().field(0).clone(),
+            json_field,
+        ])),
+        vec![
+            batch["i"].clone(),
+            Arc::new(arrow_array::StringArray::from(docs)),
+        ],
+    )
+    .unwrap();
+    let mut dataset = Dataset::write(
+        RecordBatchIterator::new(vec![Ok(batch.clone())], batch.schema()),
+        "memory://",
+        Some(WriteParams {
+            max_rows_per_file: 4,
+            ..Default::default()
+        }),
+    )
+    .await
+    .unwrap();
+    let params = ScalarIndexParams::new("json".into()).with_params(&serde_json::json!({
+        "target_index_type": target, "path": "v",
+    }));
+    dataset
+        .create_index(
+            &["json"],
+            IndexType::Scalar,
+            Some("json_idx".into()),
+            &params,
+            true,
+        )
+        .await
+        .unwrap();
+    let original = dataset
+        .load_index_by_name("json_idx")
+        .await
+        .unwrap()
+        .unwrap();
+    dataset.delete("i = 3").await.unwrap();
+    let (transition, destinations) = prepare(&dataset).await;
+    let content = InlineContent {
+        legacy_versions: vec![],
+        transitions: vec![transition],
+    }
+    .encode_to_vec();
+    install(&mut dataset, content, destinations, external).await;
+    let index = dataset
+        .load_index_by_name("json_idx")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(index.uuid, original.uuid);
+    assert_eq!(
+        index.fragment_bitmap.as_ref().unwrap(),
+        dataset.fragment_bitmap.as_ref()
+    );
+    let predicates = if text {
+        vec!["contains(json_get_string(json, 'v'), 'needle')"]
+    } else {
+        vec![
+            "json_get_int(json, 'v') = 6",
+            "json_get_int(json, 'v') IS NULL",
+        ]
+    };
+    for prewarm in [false, true] {
+        if prewarm {
+            dataset.prewarm_index("json_idx").await.unwrap();
+        }
+        for predicate in &predicates {
+            let mut scan = dataset.scan();
+            scan.filter(predicate).unwrap();
+            let plan = scan.explain_plan(false).await.unwrap();
+            assert!(plan.contains("ScalarIndexQuery"), "{target}: {plan}");
+            let actual = scan.try_into_batch().await.unwrap();
+            let mut scan = dataset.scan();
+            scan.use_scalar_index(false).filter(predicate).unwrap();
+            let expected = scan.try_into_batch().await.unwrap();
+            let ids = |batch: &RecordBatch| {
+                let mut ids = batch["i"].as_primitive::<Int32Type>().values().to_vec();
+                ids.sort_unstable();
+                ids
+            };
+            assert_eq!(ids(&actual), ids(&expected), "{target}: {predicate}");
+        }
+    }
+}
+
+#[rstest::rstest]
+#[case::btree("BTree", Some(true))]
+#[case::fm("Fm", Some(true))]
+#[case::minhash("MinHashLsh", Some(true))]
+#[case::unsupported_fts("Inverted", Some(false))]
+#[case::unknown("Unknown", None)]
+#[tokio::test]
+async fn json_tagged_remapping_checks_target_capability(
+    #[case] target: &str,
+    #[case] expected: Option<bool>,
+) {
+    let dataset = fixture().await;
+    let mut index = dataset.load_index_by_name("i_idx").await.unwrap().unwrap();
+    let target = prost_types::Any {
+        type_url: format!("/lance.table.{target}IndexDetails"),
+        value: vec![],
+    };
+    // Use native protobuf identities for types in the newer package.
+    let target = match target.type_url.as_str() {
+        "/lance.table.FmIndexDetails" => {
+            prost_types::Any::from_msg(&lance_index::pb::FmIndexDetails {}).unwrap()
+        }
+        "/lance.table.MinHashLshIndexDetails" => {
+            prost_types::Any::from_msg(&lance_index::pb::MinHashLshIndexDetails::default()).unwrap()
+        }
+        _ => target,
+    };
+    let mut details = target;
+    for _ in 0..2 {
+        details = prost_types::Any::from_msg(&lance_index::pb::JsonIndexDetails {
+            path: "v".into(),
+            target_details: Some(details),
+            target_index_version: Some(0),
+            ..Default::default()
+        })
+        .unwrap();
+        index.index_details = Some(Arc::new(details.clone()));
+        assert_eq!(
+            segment_supports_batch_remapping(&dataset, &index)
+                .await
+                .unwrap(),
+            expected
+        );
+    }
+    let mut legacy = details
+        .to_msg::<lance_index::pb::JsonIndexDetails>()
+        .unwrap();
+    legacy.target_index_version = None;
+    index.index_details = Some(Arc::new(prost_types::Any::from_msg(&legacy).unwrap()));
+    assert_eq!(
+        segment_supports_batch_remapping(&dataset, &index)
+            .await
+            .unwrap(),
+        Some(false)
+    );
+    for value in [vec![], vec![0xff]] {
+        details.value = value;
+        index.index_details = Some(Arc::new(details.clone()));
+        assert_eq!(
+            segment_supports_batch_remapping(&dataset, &index)
+                .await
+                .unwrap(),
+            None
+        );
+    }
+}
+
+#[rstest::rstest]
+#[case::explicit_merge(false)]
+#[case::single_segment_optimize(true)]
+#[tokio::test]
+async fn minhash_tagged_remapping_preserves_index_search_and_merge(#[case] optimize: bool) {
+    let mut dataset = lance_datagen::gen_batch()
+        .col("i", lance_datagen::array::step::<Int32Type>())
+        .col(
+            "text",
+            lance_datagen::array::fill_utf8("a matching document".to_string()),
+        )
+        .into_ram_dataset(FragmentCount::from(2), FragmentRowCount::from(4))
+        .await
+        .unwrap();
+    let params = ScalarIndexParams::for_builtin(lance_index::scalar::BuiltinIndexType::MinHashLsh)
+        .with_params(&MinHashLshIndexParams::default());
+    let fragments: Vec<_> = dataset.fragment_bitmap.iter().collect();
+    let fragments_per_segment = if optimize { 2 } else { 1 };
+    let mut sources = Vec::with_capacity(fragments.len() / fragments_per_segment);
+    for fragment_group in fragments.chunks(fragments_per_segment) {
+        sources.push(
+            CreateIndexBuilder::new(&mut dataset, &["text"], IndexType::MinHashLsh, &params)
+                .name("text_idx".into())
+                .fragments(fragment_group.to_vec())
+                .execute_uncommitted()
+                .await
+                .unwrap(),
+        );
+    }
+    dataset
+        .commit_existing_index_segments("text_idx", "text", sources.clone())
+        .await
+        .unwrap();
+    dataset.delete("i = 3").await.unwrap();
+    let (transition, new_fragments) = prepare(&dataset).await;
+    let frag_reuse_index =
+        super::super::frag_reuse::frag_reuse_entry_appending(&dataset, vec![transition])
+            .await
+            .unwrap();
+    let rewrite = lance_table::transaction::Transaction::new(
+        dataset.manifest.version,
+        lance_table::transaction::Operation::Rewrite {
+            groups: vec![lance_table::transaction::RewriteGroup {
+                old_fragments: dataset.fragments().as_ref().clone(),
+                new_fragments,
+            }],
+            rewritten_indices: vec![],
+            frag_reuse_index: Some(frag_reuse_index),
+        },
+        None,
+    );
+    let mut dataset = crate::dataset::CommitBuilder::new(Arc::new(dataset))
+        .execute(rewrite)
+        .await
+        .unwrap();
+
+    async fn assert_index_hits(dataset: &Dataset, expected_ids: &[i32]) {
+        let mut scan = dataset.scan();
+        scan.fast_search();
+        scan.minhash_search(MinHashQuery::new("a matching document", "text"))
+            .unwrap();
+        scan.limit(Some(8), None).unwrap();
+        let batch = scan.try_into_batch().await.unwrap();
+        let mut ids = batch["i"].as_primitive::<Int32Type>().values().to_vec();
+        ids.sort_unstable();
+        assert_eq!(ids.as_slice(), expected_ids);
+    }
+    let mut expected_ids = vec![0, 1, 2, 4, 5, 6, 7];
+    assert_index_hits(&dataset, &expected_ids).await;
+    dataset.prewarm_index("text_idx").await.unwrap();
+    assert_index_hits(&dataset, &expected_ids).await;
+
+    let merged_uuid = if optimize {
+        let data_files: Vec<_> = dataset
+            .fragments()
+            .iter()
+            .flat_map(|fragment| fragment.files.iter().map(|file| file.path.clone()))
+            .collect();
+        let appended =
+            arrow_array::record_batch!(("i", Int32, [8]), ("text", Utf8, ["a matching document"]))
+                .unwrap();
+        dataset
+            .append(
+                RecordBatchIterator::new(vec![Ok(appended.clone())], appended.schema()),
+                None,
+            )
+            .await
+            .unwrap();
+        dataset.object_store.io_stats_incremental();
+        dataset
+            .optimize_indices(&OptimizeOptions::default())
+            .await
+            .unwrap();
+        let requests = dataset.object_store.io_stats_incremental().requests;
+        let rescan = requests.iter().find(|request| {
+            data_files
+                .iter()
+                .any(|file| request.path.as_ref().ends_with(file))
+        });
+        assert!(rescan.is_none(), "old text was rescanned: {rescan:?}");
+        // Merging translates signatures but keeps their stored provenance.
+        // A rebuild would claim the new fragments directly.
+        let provenance: RoaringBitmap = sources
+            .iter()
+            .flat_map(|source| source.fragment_bitmap.as_ref().unwrap().iter())
+            .collect();
+        let stored = crate::index::loading::load_all_indices_by_name(&dataset, "text_idx")
+            .await
+            .unwrap();
+        assert_eq!(stored.len(), 1);
+        assert_ne!(stored[0].uuid, sources[0].uuid);
+        assert!(provenance.is_subset(stored[0].fragment_bitmap.as_ref().unwrap()));
+        expected_ids.push(8);
+        None
+    } else {
+        let merged = dataset
+            .merge_existing_index_segments(sources)
+            .await
+            .unwrap();
+        assert_eq!(
+            merged.fragment_bitmap.as_ref(),
+            Some(dataset.fragment_bitmap.as_ref())
+        );
+        let merged_uuid = merged.uuid;
+        dataset
+            .commit_existing_index_segments("text_idx", "text", vec![merged])
+            .await
+            .unwrap();
+        Some(merged_uuid)
+    };
+    let segments = dataset.load_indices_by_name("text_idx").await.unwrap();
+    assert_eq!(segments.len(), 1);
+    if let Some(merged_uuid) = merged_uuid {
+        assert_eq!(segments[0].uuid, merged_uuid);
+    }
+    assert_index_hits(&dataset, &expected_ids).await;
 }
 
 #[rstest::rstest]
@@ -1889,13 +2224,22 @@ async fn vector_partition_uses_shared_remapping_and_cached_reconstruction(#[case
 }
 
 #[tokio::test]
-async fn unsupported_scalar_type_is_not_advertised_for_rewritten_fragments() {
+async fn legacy_json_wrapper_is_not_advertised_for_rewritten_fragments() {
     let mut dataset = fixture().await;
-    // Only metadata is needed: the unsupported reader must never open it.
+    // Only metadata is needed: a JSON wrapper without its target version must
+    // remain excluded when its stored addresses need translation.
     let mut indices = dataset.load_indices().await.unwrap().as_ref().clone();
     indices[0].index_version = 0;
     indices[0].index_details = Some(Arc::new(
-        prost_types::Any::from_msg(&lance_index::pb::FmIndexDetails::default()).unwrap(),
+        prost_types::Any::from_msg(&lance_index::pb::JsonIndexDetails {
+            path: "v".into(),
+            target_details: Some(
+                prost_types::Any::from_msg(&lance_index::pbold::BTreeIndexDetails::default())
+                    .unwrap(),
+            ),
+            ..Default::default()
+        })
+        .unwrap(),
     ));
     let key = IndexMetadataKey {
         version: dataset.manifest.version,
@@ -2279,12 +2623,10 @@ async fn resolver_dispatch_v0_uses_the_compact_handle() {
 }
 
 #[tokio::test]
-async fn legacy_api_plugin_keeps_untouched_segments_available() {
+async fn fm_keeps_translated_and_untouched_segments_available() {
     use crate::index::frag_reuse::{ResolvedRemapping, open_row_id_remapping};
     use lance_index::scalar::BuiltinIndexType;
 
-    // The FM plugin only implements the legacy synchronous API
-    // (supports_batch_row_id_remapping is false).
     let batch = arrow_array::record_batch!(
         ("i", Int32, [0, 1, 2, 3, 4, 5, 6, 7]),
         (
@@ -2348,25 +2690,22 @@ async fn legacy_api_plugin_keeps_untouched_segments_available() {
     .encode_to_vec();
     install(&mut dataset, content, destinations, false).await;
 
-    // The committed segment needs translation, which the FM plugin cannot do:
-    // it is excluded from coverage and substring queries fall back to a scan,
-    // still returning correct rows.
+    // The committed segment needs translation and remains queryable.
     let usable =
         crate::index::scalar_logical::load_named_scalar_segments(&dataset, "text", "text_idx")
             .await
             .unwrap();
-    assert!(usable.is_empty());
+    assert_eq!(usable.len(), 1);
     let mut scan = dataset.scan();
     scan.filter("contains(text, 'row2')").unwrap();
     let plan = scan.explain_plan(false).await.unwrap();
-    assert!(!plan.contains("ScalarIndexQuery"), "{plan}");
+    assert!(plan.contains("ScalarIndexQuery"), "{plan}");
     let rows = scan.try_into_batch().await.unwrap();
     assert_eq!(rows.num_rows(), 1, "{plan}");
     assert_eq!(rows["i"].as_primitive::<Int32Type>().value(0), 2);
 
     // The untouched FM segment resolves to identity, loads through the
-    // plugin's original entry point, and serves queries: the availability win
-    // for legacy-API-only plugins.
+    // plugin's original entry point, and serves queries alongside the translated segment.
     let mut all = crate::index::loading::load_all_indices(&dataset)
         .await
         .unwrap()
@@ -2385,8 +2724,8 @@ async fn legacy_api_plugin_keeps_untouched_segments_available() {
         crate::index::scalar_logical::load_named_scalar_segments(&dataset, "text", "text_idx")
             .await
             .unwrap();
-    assert_eq!(usable.len(), 1);
-    assert_eq!(usable[0].uuid, untouched.uuid);
+    assert_eq!(usable.len(), 2);
+    assert!(usable.iter().any(|segment| segment.uuid == untouched.uuid));
     let mut scan = dataset.scan();
     scan.filter("contains(text, 'extra8')").unwrap();
     let plan = scan.explain_plan(false).await.unwrap();
@@ -2394,8 +2733,7 @@ async fn legacy_api_plugin_keeps_untouched_segments_available() {
     let rows = scan.try_into_batch().await.unwrap();
     assert_eq!(rows.num_rows(), 1, "{plan}");
     assert_eq!(rows["i"].as_primitive::<Int32Type>().value(0), 8);
-    // Rows in fragments the identity segment does not cover still come back
-    // correctly through the scan side of the plan.
+    // The translated segment still serves its original rows.
     assert_eq!(
         dataset
             .count_rows(Some("contains(text, 'row2')".into()))

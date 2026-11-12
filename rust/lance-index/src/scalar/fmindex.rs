@@ -37,7 +37,7 @@ use lance_core::utils::address::RowAddress;
 use lance_core::utils::parse::str_is_truthy;
 use lance_core::utils::tokio::{get_num_compute_intensive_cpus, spawn_cpu};
 use lance_core::{Error, ROW_ADDR, Result};
-use lance_index_core::remapping::RowAddrTranslator;
+use lance_index_core::remapping::{BatchRowIdRemapper, RowAddrTranslator, remap_row_ids_async};
 use roaring::RoaringBitmap;
 
 use crate::metrics::MetricsCollector;
@@ -1517,6 +1517,15 @@ impl FMIndexScalarIndex {
     async fn load(
         store: Arc<dyn IndexStore>,
         fri: Option<Arc<dyn RowIdRemapper>>,
+        cache: &LanceCache,
+    ) -> Result<Arc<Self>> {
+        Self::load_with_remapping(store, fri, None, cache).await
+    }
+
+    async fn load_with_remapping(
+        store: Arc<dyn IndexStore>,
+        fri: Option<Arc<dyn RowIdRemapper>>,
+        remapping: Option<Arc<dyn BatchRowIdRemapper>>,
         _cache: &LanceCache,
     ) -> Result<Arc<Self>> {
         let files = store.list_files_with_sizes().await?;
@@ -1535,9 +1544,19 @@ impl FMIndexScalarIndex {
             .map(|(id, name)| {
                 let store = Arc::clone(&store);
                 let fri = fri.clone();
+                let remapping = remapping.clone();
                 async move {
                     let mut partition = Self::load_partition(store.as_ref(), &name, id).await?;
-                    if let Some(fri) = fri {
+                    if let Some(remapping) = remapping {
+                        // Suffix-array positions refer to document slots, so deleted rows
+                        // must keep their slots rather than shift later documents.
+                        let translated =
+                            remap_row_ids_async(remapping.as_ref(), &partition.fm.row_ids).await?;
+                        for (row_id, translated) in partition.fm.row_ids.iter_mut().zip(translated)
+                        {
+                            *row_id = translated.unwrap_or(RowAddress::TOMBSTONE_ROW);
+                        }
+                    } else if let Some(fri) = fri {
                         for row_id in &mut partition.fm.row_ids {
                             *row_id = fri
                                 .remap_row_id(*row_id)
@@ -2365,6 +2384,22 @@ impl ScalarIndexPlugin for FMIndexPlugin {
         let _ = details.to_msg::<pb::FmIndexDetails>().unwrap_or_default();
         Ok(FMIndexScalarIndex::load(store, fri, cache).await? as Arc<dyn ScalarIndex>)
     }
+    fn supports_batch_row_id_remapping(&self) -> bool {
+        true
+    }
+
+    async fn load_index_with_remapping(
+        &self,
+        store: Arc<dyn IndexStore>,
+        details: &prost_types::Any,
+        _index_version: u32,
+        remapping: Option<Arc<dyn BatchRowIdRemapper>>,
+        cache: &LanceCache,
+    ) -> Result<Arc<dyn ScalarIndex>> {
+        details.to_msg::<pb::FmIndexDetails>()?;
+        Ok(FMIndexScalarIndex::load_with_remapping(store, None, remapping, cache).await?)
+    }
+
     async fn load_statistics(
         &self,
         _: Arc<dyn IndexStore>,
@@ -2701,6 +2736,7 @@ mod tests {
     async fn test_load_remaps_positional_row_addresses(
         #[case] deleted: Vec<u64>,
         #[values(false, true)] is_prewarmed: bool,
+        #[values(false, true)] batch_remapping: bool,
     ) {
         let tempdir = tempfile::tempdir().unwrap();
         let store = Arc::new(LanceIndexStore::new(
@@ -2727,10 +2763,32 @@ mod tests {
         let remapper = Arc::new(CompactedToFragmentOne {
             deleted: deleted.into_iter().collect(),
         });
-        let index =
-            FMIndexScalarIndex::load(store, Some(remapper.clone()), &LanceCache::no_cache())
+        let plugin = FMIndexPlugin;
+        let details = prost_types::Any::from_msg(&pb::FmIndexDetails {}).unwrap();
+        let index = if batch_remapping {
+            assert!(plugin.supports_batch_row_id_remapping());
+            plugin
+                .load_index_with_remapping(
+                    store,
+                    &details,
+                    FMINDEX_INDEX_VERSION,
+                    Some(remapper.clone()),
+                    &LanceCache::no_cache(),
+                )
                 .await
-                .unwrap();
+                .unwrap()
+        } else {
+            plugin
+                .load_index(
+                    store,
+                    &details,
+                    FMINDEX_INDEX_VERSION,
+                    Some(remapper.clone()),
+                    &LanceCache::no_cache(),
+                )
+                .await
+                .unwrap()
+        };
         if is_prewarmed {
             index.prewarm().await.unwrap();
         }
